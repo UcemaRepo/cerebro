@@ -12,6 +12,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DATA_FILE = "conversations.json"
 PERSONALITY_FILE = "personality.txt"
 
+
+user_last_seen = {}
 last_uploaded_text = ""
 last_uploaded_image = None
 
@@ -57,6 +59,7 @@ def chat():
 
     message = data.get("message")
     user = data.get("user")
+    user_last_seen = {}
 
     history = load_history()
     personality = load_personality()
@@ -199,16 +202,23 @@ def history():
 @app.route("/users")
 def users():
 
-    history = load_history()
+    now = time.time()
 
-    return jsonify(list(history.keys()))
+    result = []
 
-@app.route("/history/<user>")
-def user_history(user):
+    for user in user_conversations.keys():
 
-    history = load_history()
+        last = user_last_seen.get(user,0)
 
-    return jsonify(history.get(user,[]))
+        online = now - last < 30
+
+        result.append({
+            "name":user,
+            "online":online
+        })
+
+    return jsonify(result)
+
 
 
 @app.route("/delete/<user>", methods=["DELETE"])
@@ -232,6 +242,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
