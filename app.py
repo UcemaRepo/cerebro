@@ -60,7 +60,7 @@ def chat():
 
     message = data.get("message")
     user = data.get("user")
-    user_last_seen = {}
+    user_last_seen[user] = time.time()
 
     history = load_history()
     personality = load_personality()
@@ -240,6 +240,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
