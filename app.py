@@ -192,12 +192,16 @@ def upload():
 
 
 # historial
-@app.route("/history", methods=["GET"])
-def history():
+@app.route("/history")
+def get_all_history():
+    return jsonify(load_history())
 
-    history = load_history()
 
-    return jsonify(history)
+@app.route("/history/<user>")
+def get_user_history(user):
+    return jsonify(user_conversations.get(user, []))
+
+
 
 
 @app.route("/users")
@@ -217,10 +221,6 @@ def users():
         })
 
     return jsonify(result)
-
-@app.route("/history/<user>")
-def history(user):
-    return jsonify(user_conversations.get(user, []))
 
 
 
@@ -245,6 +245,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
