@@ -218,6 +218,11 @@ def users():
 
     return jsonify(result)
 
+@app.route("/history/<user>")
+def history(user):
+    return jsonify(user_conversations.get(user, []))
+
+
 
 @app.route("/delete/<user>", methods=["DELETE"])
 def delete_user(user):
@@ -240,6 +245,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
