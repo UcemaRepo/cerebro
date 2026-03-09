@@ -200,15 +200,17 @@ def get_all_history():
 @app.route("/history/<user>")
 def get_user_history(user):
 
-    print("User:", user)
-
     history = load_history()
 
-    print(history)
+    user_history = []
 
-    user_history = [h for h in history if h["user"] == user]
+    for h in history:
+
+        if isinstance(h, dict) and h.get("user") == user:
+            user_history.append(h)
 
     return jsonify(user_history)
+
 
 
 
@@ -255,6 +257,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
