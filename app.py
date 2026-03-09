@@ -12,6 +12,9 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DATA_FILE = "conversations.json"
 PERSONALITY_FILE = "personality.txt"
 
+last_uploaded_text = ""
+
+
 # cargar historial
 def load_history():
     if not os.path.exists(DATA_FILE):
@@ -40,21 +43,31 @@ def save_personality(text):
 @app.route("/chat", methods=["POST"])
 def chat():
 
+    global last_uploaded_text
+
     data = request.json
     message = data.get("message")
 
     history = load_history()
-
     personality = load_personality()
 
     messages = [
         {"role":"system","content":personality}
     ]
 
+    # historial
     for h in history[-10:]:
         messages.append({"role":"user","content":h["message"]})
         messages.append({"role":"assistant","content":h["reply"]})
 
+    # 👇 AQUI VA EL CAMBIO
+    if last_uploaded_text:
+        messages.append({
+            "role":"system",
+            "content": "El usuario subió el siguiente documento para analizar:\n\n" + last_uploaded_text
+        })
+
+    # mensaje del usuario
     messages.append({"role":"user","content":message})
 
     response = client.chat.completions.create(
@@ -68,6 +81,11 @@ def chat():
         "message":message,
         "reply":reply
     })
+
+    save_history(history)
+
+    return jsonify({"reply":reply})
+
 
     save_history(history)
 
@@ -90,6 +108,8 @@ def personality():
 @app.route("/upload", methods=["POST"])
 def upload():
 
+    global last_uploaded_text
+
     file = request.files["file"]
 
     os.makedirs("uploads", exist_ok=True)
@@ -98,7 +118,12 @@ def upload():
 
     file.save(path)
 
+    # leer archivo
+    with open(path, "r", encoding="utf-8") as f:
+        last_uploaded_text = f.read()
+
     return jsonify({"status":"uploaded"})
+
 
 
 # historial
@@ -118,4 +143,5 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
