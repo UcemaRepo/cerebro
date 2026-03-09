@@ -46,6 +46,7 @@ def save_personality(text):
 def chat():
 
     global last_uploaded_text
+    global last_uploaded_image
 
     data = request.json
     message = data.get("message")
@@ -54,48 +55,44 @@ def chat():
     personality = load_personality()
 
     messages = [
-        {"role":"system","content":personality}
+        {"role": "system", "content": personality}
     ]
 
     # historial
     for h in history[-10:]:
-        messages.append({"role":"user","content":h["message"]})
-        messages.append({"role":"assistant","content":h["reply"]})
+        messages.append({"role": "user", "content": h["message"]})
+        messages.append({"role": "assistant", "content": h["reply"]})
 
-    # 👇 AQUI VA EL CAMBIO
     # si hay texto subido
-if last_uploaded_text:
-    messages.append({
-        "role":"system",
-        "content":"El usuario subió el siguiente documento:\n\n" + last_uploaded_text
-    })
-if last_uploaded_image:
+    if last_uploaded_text:
+        messages.append({
+            "role": "system",
+            "content": "El usuario subió el siguiente documento:\n\n" + last_uploaded_text
+        })
 
-    import base64
+    # si hay imagen subida
+    if last_uploaded_image:
 
-    with open(last_uploaded_image, "rb") as img:
-        b64 = base64.b64encode(img.read()).decode("utf-8")
+        import base64
 
-    messages.append({
-        "role":"user",
-        "content":[
-            {"type":"text","text":message},
-            {
-                "type":"image_url",
-                "image_url":{
-                    "url":f"data:image/jpeg;base64,{b64}"
+        with open(last_uploaded_image, "rb") as img:
+            b64 = base64.b64encode(img.read()).decode("utf-8")
+
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": message},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{b64}"
+                    }
                 }
-            }
-        ]
-    })
+            ]
+        })
 
-else:
-
-    messages.append({"role":"user","content":message})
-
-
-    # mensaje del usuario
-    messages.append({"role":"user","content":message})
+    else:
+        messages.append({"role": "user", "content": message})
 
     response = client.chat.completions.create(
         model="gpt-5",
@@ -105,18 +102,14 @@ else:
     reply = response.choices[0].message.content
 
     history.append({
-        "message":message,
-        "reply":reply
+        "message": message,
+        "reply": reply
     })
 
     save_history(history)
 
-    return jsonify({"reply":reply})
+    return jsonify({"reply": reply})
 
-
-    save_history(history)
-
-    return jsonify({"reply":reply})
 
 
 # guardar personalidad
@@ -186,6 +179,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
