@@ -13,6 +13,8 @@ DATA_FILE = "conversations.json"
 PERSONALITY_FILE = "personality.txt"
 
 last_uploaded_text = ""
+last_uploaded_image = None
+
 
 
 # cargar historial
@@ -61,11 +63,36 @@ def chat():
         messages.append({"role":"assistant","content":h["reply"]})
 
     # 👇 AQUI VA EL CAMBIO
-    if last_uploaded_text:
-        messages.append({
-            "role":"system",
-            "content": "El usuario subió el siguiente documento para analizar:\n\n" + last_uploaded_text
-        })
+    # si hay texto subido
+if last_uploaded_text:
+    messages.append({
+        "role":"system",
+        "content":"El usuario subió el siguiente documento:\n\n" + last_uploaded_text
+    })
+if last_uploaded_image:
+
+    import base64
+
+    with open(last_uploaded_image, "rb") as img:
+        b64 = base64.b64encode(img.read()).decode("utf-8")
+
+    messages.append({
+        "role":"user",
+        "content":[
+            {"type":"text","text":message},
+            {
+                "type":"image_url",
+                "image_url":{
+                    "url":f"data:image/jpeg;base64,{b64}"
+                }
+            }
+        ]
+    })
+
+else:
+
+    messages.append({"role":"user","content":message})
+
 
     # mensaje del usuario
     messages.append({"role":"user","content":message})
@@ -109,6 +136,7 @@ def personality():
 def upload():
 
     global last_uploaded_text
+    global last_uploaded_image
 
     file = request.files["file"]
 
@@ -118,11 +146,26 @@ def upload():
 
     file.save(path)
 
-    # leer archivo
-    with open(path, "r", encoding="utf-8") as f:
-        last_uploaded_text = f.read()
+    last_uploaded_text = ""
+    last_uploaded_image = None
+
+    filename = file.filename.lower()
+
+    if filename.endswith(".txt") or filename.endswith(".csv"):
+
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            last_uploaded_text = f.read()
+
+    elif filename.endswith(".jpg") or filename.endswith(".jpeg") or filename.endswith(".png"):
+
+        last_uploaded_image = path
+
+    else:
+
+        return jsonify({"error": "Tipo de archivo no soportado"}), 400
 
     return jsonify({"status":"uploaded"})
+
 
 
 
@@ -143,5 +186,6 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
