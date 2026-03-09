@@ -19,15 +19,20 @@ last_uploaded_image = None
 
 # cargar historial
 def load_history():
+
     if not os.path.exists(DATA_FILE):
-        return []
+        return {}
+
     with open(DATA_FILE,"r") as f:
         return json.load(f)
 
+
 # guardar historial
 def save_history(history):
+
     with open(DATA_FILE,"w") as f:
         json.dump(history,f,indent=2)
+
 
 # cargar personalidad
 def load_personality():
@@ -49,50 +54,59 @@ def chat():
     global last_uploaded_image
 
     data = request.json
+
     message = data.get("message")
+    user = data.get("user")
 
     history = load_history()
     personality = load_personality()
 
+    # crear historial si no existe
+    if user not in history:
+        history[user] = []
+
+    user_history = history[user]
+
     messages = [
-        {"role": "system", "content": personality}
+        {"role":"system","content":personality}
     ]
 
-    # historial
-    for h in history[-10:]:
-        messages.append({"role": "user", "content": h["message"]})
-        messages.append({"role": "assistant", "content": h["reply"]})
+    # historial reciente
+    for h in user_history[-10:]:
+        messages.append({"role":"user","content":h["message"]})
+        messages.append({"role":"assistant","content":h["reply"]})
 
-    # si hay texto subido
+    # documento subido
     if last_uploaded_text:
         messages.append({
-            "role": "system",
-            "content": "El usuario subió el siguiente documento:\n\n" + last_uploaded_text
+            "role":"system",
+            "content":"El usuario subió el siguiente documento:\n\n"+last_uploaded_text
         })
 
-    # si hay imagen subida
+    # imagen subida
     if last_uploaded_image:
 
         import base64
 
-        with open(last_uploaded_image, "rb") as img:
+        with open(last_uploaded_image,"rb") as img:
             b64 = base64.b64encode(img.read()).decode("utf-8")
 
         messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": message},
+            "role":"user",
+            "content":[
+                {"type":"text","text":message},
                 {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{b64}"
+                    "type":"image_url",
+                    "image_url":{
+                        "url":f"data:image/jpeg;base64,{b64}"
                     }
                 }
             ]
         })
 
     else:
-        messages.append({"role": "user", "content": message})
+
+        messages.append({"role":"user","content":message})
 
     response = client.chat.completions.create(
         model="gpt-5",
@@ -101,14 +115,18 @@ def chat():
 
     reply = response.choices[0].message.content
 
-    history.append({
-        "message": message,
-        "reply": reply
+    # guardar conversación
+    user_history.append({
+        "message":message,
+        "reply":reply
     })
+
+    history[user] = user_history
 
     save_history(history)
 
-    return jsonify({"reply": reply})
+    return jsonify({"reply":reply})
+
 
 
 
@@ -122,6 +140,13 @@ def personality():
     save_personality(text)
 
     return jsonify({"status":"ok"})
+
+@app.route("/personality", methods=["GET"])
+def get_personality():
+
+    return jsonify({
+        "personality": load_personality()
+    })
 
 
 # subir archivos
@@ -171,6 +196,34 @@ def history():
     return jsonify(history)
 
 
+@app.route("/users")
+def users():
+
+    history = load_history()
+
+    return jsonify(list(history.keys()))
+
+@app.route("/history/<user>")
+def user_history(user):
+
+    history = load_history()
+
+    return jsonify(history.get(user,[]))
+
+
+@app.route("/delete/<user>", methods=["DELETE"])
+def delete_user(user):
+
+    history = load_history()
+
+    if user in history:
+        del history[user]
+
+    save_history(history)
+
+    return jsonify({"status":"deleted"})
+
+
 @app.route("/")
 def home():
     return "AI Backend Running"
@@ -179,6 +232,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
