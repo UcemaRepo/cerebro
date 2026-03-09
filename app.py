@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -206,19 +207,16 @@ def users():
 
     result = []
 
-    for user in user_conversations.keys():
+    for user, last in user_last_seen.items():
 
-        last = user_last_seen.get(user,0)
-
-        online = now - last < 30
+        online = (now - last) < 30
 
         result.append({
-            "name":user,
-            "online":online
+            "name": user,
+            "online": online
         })
 
     return jsonify(result)
-
 
 
 @app.route("/delete/<user>", methods=["DELETE"])
@@ -242,6 +240,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
