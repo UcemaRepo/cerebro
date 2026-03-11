@@ -144,7 +144,7 @@ def chat():
         messages.append({"role": "user", "content": message})
 
     response = client.chat.completions.create(
-        model="gpt-5",
+        model="gpt-5.4",
         messages=messages
     )
 
@@ -287,6 +287,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
