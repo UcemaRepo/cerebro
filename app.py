@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -19,11 +20,11 @@ user_presence       = {}
 last_uploaded_text  = {}
 last_uploaded_image = {}
 
-AWAY_THRESHOLD = 300  # 5 minutos
+AWAY_THRESHOLD = 300
 
-# ── Sesiones compartidas efímeras (solo en memoria, no en disco) ────────
-# { owner: { "participants": set(), "messages": [ {actor, message, reply, ts} ] } }
-shared_sessions = {}
+# ── Salas efímeras ─────────────────────────────────────────────────────
+# { room_id: { name, creator, participants: set(), messages: [], created_at } }
+rooms = {}
 
 
 # ── Historial permanente ────────────────────────────────────────────────
@@ -49,19 +50,23 @@ def save_events(events):
     with open(EVENTS_FILE, "w") as f:
         json.dump(events, f, indent=2)
 
-def push_event(owner, event_type, actor, text="", reply=""):
+def push_event(target_user, event_type, actor, **kwargs):
+    """Push an event to a specific user's event queue."""
     events = load_events()
-    if owner not in events:
-        events[owner] = []
-    events[owner].append({
-        "type":   event_type,
-        "actor":  actor,
-        "text":   text,
-        "reply":  reply,         # incluimos reply para que el dueño pueda renderizar
-        "ts":     time.time()
-    })
-    events[owner] = events[owner][-100:]
+    if target_user not in events:
+        events[target_user] = []
+    entry = {"type": event_type, "actor": actor, "ts": time.time()}
+    entry.update(kwargs)
+    events[target_user].append(entry)
+    events[target_user] = events[target_user][-100:]
     save_events(events)
+
+def broadcast_to_room(room_id, event_type, actor, **kwargs):
+    """Push an event to every participant of a room."""
+    if room_id not in rooms:
+        return
+    for participant in rooms[room_id]["participants"]:
+        push_event(participant, event_type, actor, room_id=room_id, **kwargs)
 
 
 # ── Personalidades ──────────────────────────────────────────────────────
@@ -105,12 +110,12 @@ Valor1   | Valor2   | Valor3
 Widget informativo (dato clave, resumen, alerta):
 <widget title="Título">Contenido del widget</widget>
 
-Archivo descargable — REGLAS IMPORTANTES:
-- Usá SOLO extensiones de texto plano: .txt, .csv, .md, .json, .html
-- NUNCA uses .docx, .xlsx o .pptx — son binarios, no texto
-- Para tablas exportables usá .csv, para documentos .md o .html
+Archivo descargable — REGLAS:
+- Usá SOLO: .txt, .csv, .md, .json, .html
+- NUNCA: .docx, .xlsx, .pptx (son binarios)
+- Para tablas → .csv | Para documentos → .md o .html
 
-<download filename="archivo.csv">col1,col2
+<download filename="datos.csv">col1,col2
 valor1,valor2</download>
 
 Usá estas etiquetas solo cuando aporten valor concreto.
@@ -195,44 +200,39 @@ def chat():
     history[user].append(entry)
     save_history(history)
 
-    # Notificar a quienes tengan este chat en el espejo
-    push_event(user, "message", user, message, reply)
+    # Notificar espejo pasivo
+    push_event(user, "mirror_update", user, message=message, reply=reply)
 
     return jsonify({"reply": reply})
 
 
-# ── Endpoint: chat efímero compartido ──────────────────────────────────
-@app.route("/shared-chat", methods=["POST"])
-def shared_chat():
-    """Mensajes dentro de una sesión compartida. NO se guardan en conversations.json."""
+# ── Endpoint: chat de sala efímera ─────────────────────────────────────
+@app.route("/room-chat", methods=["POST"])
+def room_chat():
     data    = request.json
     message = data.get("message")
-    user    = data.get("user")        # quien escribe
-    owner   = data.get("owner")       # dueño del chat
+    user    = data.get("user")
+    room_id = data.get("room_id")
     preset  = data.get("personality", "normal")
 
-    user_presence[user] = {"last_seen": time.time(), "status": "online"}
+    if room_id not in rooms:
+        return jsonify({"error": "sala no existe"}), 404
 
-    if owner not in shared_sessions:
-        return jsonify({"error": "sesión no existe"}), 404
-
-    session          = shared_sessions[owner]
-    personality_text = get_personality_text(owner, preset)  # usa personalidad del dueño
+    room             = rooms[room_id]
+    personality_text = get_personality_text(user, preset)
 
     messages = [
         {"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH},
         {"role": "system", "content": (
-            f"Estás en una sesión compartida entre '{owner}' y sus invitados: "
-            f"{', '.join(session['participants'])}. "
-            f"Esta conversación es efímera y no se guarda permanentemente. "
-            f"Respondé a quien escribe manteniendo contexto de toda la sesión."
+            f"Estás en la sala compartida '{room['name']}'. "
+            f"Participantes actuales: {', '.join(room['participants'])}. "
+            f"Esta sesión es efímera: no se guarda permanentemente. "
+            f"Respondé a quien escribe manteniendo contexto de la sesión."
         )}
     ]
 
-    # Historial de la sesión efímera (no del permanente)
-    for h in session["messages"][-10:]:
-        actor_label = f"[{h['actor']}]: {h['message']}"
-        messages.append({"role": "user",      "content": actor_label})
+    for h in room["messages"][-10:]:
+        messages.append({"role": "user",      "content": f"[{h['actor']}]: {h['message']}"})
         messages.append({"role": "assistant", "content": h["reply"]})
 
     messages.append({"role": "user", "content": f"[{user}]: {message}"})
@@ -240,101 +240,112 @@ def shared_chat():
     response = client.chat.completions.create(model="gpt-5.4", messages=messages)
     reply = response.choices[0].message.content
 
-    # Guardar en sesión efímera (memoria, no disco)
-    session["messages"].append({
-        "actor":   user,
-        "message": message,
-        "reply":   reply,
-        "ts":      time.time()
+    # Guardar en sala (memoria, no disco)
+    room["messages"].append({
+        "actor": user, "message": message, "reply": reply, "ts": time.time()
     })
 
-    # Emitir evento a TODOS los participantes de la sesión para que vean el mensaje
-    for participant in session["participants"]:
-        push_event(participant, "shared_message", user, message, reply)
+    # Broadcast a todos en la sala
+    broadcast_to_room(room_id, "room_message", user,
+                      message=message, reply=reply, room_name=room["name"])
 
-    return jsonify({"reply": reply, "ephemeral": True})
+    return jsonify({"reply": reply, "room_id": room_id})
 
 
-# ── Endpoint: entrar a sesión compartida ───────────────────────────────
-@app.route("/join-chat", methods=["POST"])
-def join_chat_endpoint():
-    data  = request.json
-    user  = data.get("user")
-    owner = data.get("owner")
+# ── Endpoints: gestión de salas ─────────────────────────────────────────
+@app.route("/rooms", methods=["GET"])
+def list_rooms():
+    result = []
+    for rid, room in rooms.items():
+        result.append({
+            "id":           rid,
+            "name":         room["name"],
+            "creator":      room["creator"],
+            "participants": list(room["participants"]),
+            "msg_count":    len(room["messages"]),
+            "created_at":   room["created_at"],
+        })
+    return jsonify(result)
 
-    if not user or not owner or user == owner:
-        return jsonify({"error": "datos inválidos"}), 400
+@app.route("/rooms", methods=["POST"])
+def create_room():
+    data    = request.json
+    user    = data.get("user")
+    name    = data.get("name", f"Sala de {user}").strip()
+    room_id = str(uuid.uuid4())[:8]
 
-    # Crear sesión si no existe
-    if owner not in shared_sessions:
-        shared_sessions[owner] = {"participants": set(), "messages": []}
+    rooms[room_id] = {
+        "name":        name,
+        "creator":     user,
+        "participants": {user},
+        "messages":    [],
+        "created_at":  time.time(),
+    }
 
-    shared_sessions[owner]["participants"].add(user)
-    shared_sessions[owner]["participants"].add(owner)
+    # Broadcast a todos los usuarios online que hay una sala nueva
+    for u in user_presence:
+        push_event(u, "room_created", user, room_id=room_id, room_name=name)
 
-    # Notificar a TODOS en la sesión (incluyendo al dueño)
-    for participant in shared_sessions[owner]["participants"]:
-        push_event(participant, "join", user)
+    return jsonify({"room_id": room_id, "name": name})
+
+@app.route("/rooms/<room_id>/join", methods=["POST"])
+def join_room(room_id):
+    data = request.json
+    user = data.get("user")
+
+    if room_id not in rooms:
+        return jsonify({"error": "sala no existe"}), 404
+
+    rooms[room_id]["participants"].add(user)
+    broadcast_to_room(room_id, "room_join", user, room_name=rooms[room_id]["name"])
 
     return jsonify({
         "status":   "joined",
-        "history":  shared_sessions[owner]["messages"]
+        "name":     rooms[room_id]["name"],
+        "history":  rooms[room_id]["messages"],
+        "participants": list(rooms[room_id]["participants"]),
     })
 
+@app.route("/rooms/<room_id>/leave", methods=["POST"])
+def leave_room(room_id):
+    data = request.json
+    user = data.get("user")
 
-# ── Endpoint: salir de sesión compartida ───────────────────────────────
-@app.route("/leave-chat", methods=["POST"])
-def leave_chat_endpoint():
-    data  = request.json
-    user  = data.get("user")
-    owner = data.get("owner")
-
-    if not user or not owner:
+    if room_id not in rooms:
         return jsonify({"status": "ok"})
 
-    if owner in shared_sessions:
-        shared_sessions[owner]["participants"].discard(user)
+    rooms[room_id]["participants"].discard(user)
+    broadcast_to_room(room_id, "room_leave", user, room_name=rooms[room_id]["name"])
 
-        # Notificar a los que quedan
-        for participant in shared_sessions[owner]["participants"]:
-            push_event(participant, "leave", user)
-
-        # Si no queda nadie (o solo el dueño), destruir la sesión
-        remaining = shared_sessions[owner]["participants"] - {owner}
-        if not remaining:
-            del shared_sessions[owner]
+    # Si la sala queda vacía, destruirla
+    if not rooms[room_id]["participants"]:
+        del rooms[room_id]
+        # Notificar a todos que la sala desapareció
+        for u in user_presence:
+            push_event(u, "room_deleted", user, room_id=room_id)
 
     return jsonify({"status": "left"})
 
-
-# ── Endpoint: historial efímero de sesión ──────────────────────────────
-@app.route("/shared-history/<owner>")
-def get_shared_history(owner):
-    if owner not in shared_sessions:
-        return jsonify([])
-    return jsonify(shared_sessions[owner]["messages"])
+@app.route("/rooms/<room_id>", methods=["GET"])
+def get_room(room_id):
+    if room_id not in rooms:
+        return jsonify({"error": "sala no existe"}), 404
+    room = rooms[room_id]
+    return jsonify({
+        "id":           room_id,
+        "name":         room["name"],
+        "participants": list(room["participants"]),
+        "messages":     room["messages"],
+    })
 
 
 # ── Endpoint: polling de eventos ───────────────────────────────────────
-@app.route("/events/<owner>")
-def get_events(owner):
+@app.route("/events/<user>")
+def get_events(user):
     since = float(request.args.get("since", 0))
     events = load_events()
-    owner_events = [e for e in events.get(owner, []) if e["ts"] > since]
-    return jsonify(owner_events)
-
-
-# ── Endpoint: notificar mensaje propio ─────────────────────────────────
-@app.route("/notify-message", methods=["POST"])
-def notify_message():
-    data  = request.json
-    owner = data.get("owner")
-    actor = data.get("actor")
-    reply = data.get("reply", "")
-    msg   = data.get("message", "")
-    if owner and actor:
-        push_event(owner, "message", actor, msg, reply)
-    return jsonify({"status": "ok"})
+    user_events = [e for e in events.get(user, []) if e["ts"] > since]
+    return jsonify(user_events)
 
 
 # ── Endpoint: personalidad ──────────────────────────────────────────────
@@ -376,13 +387,11 @@ def upload():
     last_uploaded_text[user]               = ""
     last_uploaded_image[user]              = None
     last_uploaded_text[user + "_filename"] = file.filename
-
     filename = file.filename.lower()
 
     if filename.endswith((".txt", ".csv")):
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             last_uploaded_text[user] = f.read()
-
     elif filename.endswith((".xlsx", ".xls")):
         wb = openpyxl.load_workbook(path, data_only=True)
         sheets_text = []
@@ -395,10 +404,8 @@ def upload():
             if rows:
                 sheets_text.append(f"[Hoja: {sheet_name}]\n" + "\n".join(rows))
         last_uploaded_text[user] = "\n\n".join(sheets_text)
-
     elif filename.endswith((".jpg", ".jpeg", ".png")):
         last_uploaded_image[user] = path
-
     else:
         return jsonify({"error": "Tipo de archivo no soportado"}), 400
 
@@ -406,10 +413,6 @@ def upload():
 
 
 # ── Endpoint: historial permanente ─────────────────────────────────────
-@app.route("/history")
-def get_all_history():
-    return jsonify(load_history())
-
 @app.route("/history/<user>")
 def get_user_history(user):
     return jsonify(load_history().get(user, []))
@@ -440,12 +443,13 @@ def set_offline():
     user = data.get("user")
     if user:
         user_presence[user] = {"last_seen": time.time(), "status": "offline"}
-        # Si era dueño de sesión, limpiarla
-        if user in shared_sessions:
-            for participant in shared_sessions[user]["participants"]:
-                if participant != user:
-                    push_event(participant, "session_ended", user)
-            del shared_sessions[user]
+        # Salir de todas las salas donde estaba
+        for room_id in list(rooms.keys()):
+            if user in rooms[room_id]["participants"]:
+                rooms[room_id]["participants"].discard(user)
+                broadcast_to_room(room_id, "room_leave", user, room_name=rooms[room_id]["name"])
+                if not rooms[room_id]["participants"]:
+                    del rooms[room_id]
     return jsonify({"status": "ok"})
 
 @app.route("/users")
@@ -456,6 +460,13 @@ def users():
             continue
         result.append({"name": user, "status": get_status(entry)})
     return jsonify(result)
+
+
+# ── Endpoint: historial de sala (mirror pasivo) ─────────────────────────
+@app.route("/history-mirror/<user>")
+def get_user_history_mirror(user):
+    """Para el panel espejo pasivo: devuelve historial permanente."""
+    return jsonify(load_history().get(user, []))
 
 
 # ── Home ────────────────────────────────────────────────────────────────
