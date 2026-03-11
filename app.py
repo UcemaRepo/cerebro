@@ -11,18 +11,22 @@ CORS(app)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-DATA_FILE        = "conversations.json"
+DATA_FILE          = "conversations.json"
 PERSONALITIES_FILE = "personalities.json"
-EVENTS_FILE      = "events.json"       # feed de eventos en tiempo real
+EVENTS_FILE        = "events.json"
 
-user_presence    = {}
+user_presence       = {}
 last_uploaded_text  = {}
 last_uploaded_image = {}
 
 AWAY_THRESHOLD = 300  # 5 minutos
 
+# ── Sesiones compartidas efímeras (solo en memoria, no en disco) ────────
+# { owner: { "participants": set(), "messages": [ {actor, message, reply, ts} ] } }
+shared_sessions = {}
 
-# ── Historial ──────────────────────────────────────────────────────────
+
+# ── Historial permanente ────────────────────────────────────────────────
 def load_history():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -34,8 +38,7 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
-# ── Eventos en tiempo real ─────────────────────────────────────────────
-# Estructura: { "owner": [ {type, actor, text, ts}, ... ] }
+# ── Eventos en tiempo real ──────────────────────────────────────────────
 def load_events():
     if not os.path.exists(EVENTS_FILE):
         return {}
@@ -46,29 +49,29 @@ def save_events(events):
     with open(EVENTS_FILE, "w") as f:
         json.dump(events, f, indent=2)
 
-def push_event(owner, event_type, actor, text=""):
+def push_event(owner, event_type, actor, text="", reply=""):
     events = load_events()
     if owner not in events:
         events[owner] = []
     events[owner].append({
-        "type":  event_type,   # "join" | "leave" | "message"
-        "actor": actor,
-        "text":  text,
-        "ts":    time.time()
+        "type":   event_type,
+        "actor":  actor,
+        "text":   text,
+        "reply":  reply,         # incluimos reply para que el dueño pueda renderizar
+        "ts":     time.time()
     })
-    # Mantener solo los últimos 50 eventos por chat
-    events[owner] = events[owner][-50:]
+    events[owner] = events[owner][-100:]
     save_events(events)
 
 
-# ── Personalidades ─────────────────────────────────────────────────────
+# ── Personalidades ──────────────────────────────────────────────────────
 PRESET_PERSONALITIES = {
     "normal":   "Eres un asistente útil, claro y amable.",
     "analyst":  "Eres un analista experto. Respondés con datos, métricas y razonamiento estructurado. Usás tablas comparativas cuando es útil.",
-    "creative": "Eres un asistente creativo y disruptivo. Das ideas originales, fuera de lo convencional, con entusiasmo.",
+    "creative": "Eres un asistente creativo y disruptivo. Das ideas originales, fuera de lo convencional.",
     "strict":   "Eres un asistente estricto y conciso. Respondés solo lo necesario, sin rodeos.",
-    "dev":      "Eres un desarrollador senior. Respondés con código limpio, explicaciones técnicas y buenas prácticas.",
-    "coach":    "Eres un coach ejecutivo. Hacés preguntas poderosas, motivás y ayudás a estructurar objetivos.",
+    "dev":      "Eres un desarrollador senior. Respondés con código limpio y buenas prácticas.",
+    "coach":    "Eres un coach ejecutivo. Hacés preguntas poderosas y ayudás a estructurar objetivos.",
 }
 
 def load_personalities():
@@ -104,19 +107,17 @@ Widget informativo (dato clave, resumen, alerta):
 
 Archivo descargable — REGLAS IMPORTANTES:
 - Usá SOLO extensiones de texto plano: .txt, .csv, .md, .json, .html
-- NUNCA uses .docx, .xlsx o .pptx — esos formatos son binarios y no se pueden generar como texto
-- Para tablas exportables, usá .csv
-- Para documentos formateados, usá .md o .html
-- Para datos estructurados, usá .json
+- NUNCA uses .docx, .xlsx o .pptx — son binarios, no texto
+- Para tablas exportables usá .csv, para documentos .md o .html
 
-<download filename="archivo.csv">col1,col2,col3
-valor1,valor2,valor3</download>
+<download filename="archivo.csv">col1,col2
+valor1,valor2</download>
 
 Usá estas etiquetas solo cuando aporten valor concreto.
 """
 
 
-# ── Presencia ──────────────────────────────────────────────────────────
+# ── Presencia ───────────────────────────────────────────────────────────
 def get_status(entry):
     if entry.get("status") == "offline":
         return "offline"
@@ -124,10 +125,8 @@ def get_status(entry):
     return "away" if elapsed > AWAY_THRESHOLD else "online"
 
 
-# ── Contexto de todos los usuarios (para consultas naturales) ──────────
+# ── Contexto de usuarios para consultas naturales ──────────────────────
 def build_users_context(history, known_users):
-    """Construye un resumen del historial de todos los usuarios para que el bot
-    pueda responder preguntas sobre ellos de forma natural, sin endpoint especial."""
     if not known_users:
         return ""
     lines = ["=== Historial de otros usuarios (contexto de referencia) ==="]
@@ -139,21 +138,18 @@ def build_users_context(history, known_users):
         for h in u_history[-15:]:
             lines.append(f"  [{u}]: {h['message']}")
             lines.append(f"  [Bot]: {h['reply']}")
-            # Incluir referencia a archivos si los hay
             if h.get("file"):
-                lines.append(f"  [Archivo subido]: {h['file']}")
+                lines.append(f"  [Archivo]: {h['file']}")
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-# ── Endpoint: chat principal ────────────────────────────────────────────
+# ── Endpoint: chat propio (historial permanente) ────────────────────────
 @app.route("/chat", methods=["POST"])
 def chat():
-    data          = request.json
-    message       = data.get("message")
-    user          = data.get("user")
-    preset        = data.get("personality", "normal")
-    # chat_owner: si está seteado, el usuario está dentro del chat de otra persona
-    chat_owner    = data.get("chat_owner")
+    data    = request.json
+    message = data.get("message")
+    user    = data.get("user")
+    preset  = data.get("personality", "normal")
 
     user_presence[user] = {"last_seen": time.time(), "status": "online"}
 
@@ -161,113 +157,187 @@ def chat():
     personality_text = get_personality_text(user, preset)
     all_users        = [u for u in history.keys() if u != user]
 
-    # El dueño del chat donde se escribe (puede ser el propio usuario u otro)
-    owner = chat_owner if chat_owner else user
+    if user not in history:
+        history[user] = []
 
-    if owner not in history:
-        history[owner] = []
-
-    owner_history = history[owner]
-
-    # Construir mensajes para el modelo
     messages = [{"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH}]
 
-    if chat_owner:
-        messages.append({
-            "role": "system",
-            "content": (
-                f"'{user}' se unió al chat de '{chat_owner}' y está escribiendo en él. "
-                f"Continuá la conversación con pleno contexto del historial."
-            )
-        })
-
-    # Historial del chat donde se está escribiendo
-    for h in owner_history[-10:]:
-        actor = h.get("actor", owner)
-        msg_text = f"[{actor}]: {h['message']}" if chat_owner else h["message"]
-        messages.append({"role": "user",      "content": msg_text})
+    for h in history[user][-10:]:
+        messages.append({"role": "user",      "content": h["message"]})
         messages.append({"role": "assistant", "content": h["reply"]})
 
-    # Contexto de otros usuarios para consultas naturales
     users_ctx = build_users_context(history, all_users)
     if users_ctx:
         messages.append({"role": "system", "content": users_ctx})
 
-    # Archivo subido
     uploaded_text = last_uploaded_text.get(user, "")
     if uploaded_text:
-        messages.append({
-            "role": "system",
-            "content": "El usuario subió el siguiente documento:\n\n" + uploaded_text
-        })
+        messages.append({"role": "system", "content": "Documento subido:\n\n" + uploaded_text})
 
     uploaded_image = last_uploaded_image.get(user)
     if uploaded_image:
         import base64
         with open(uploaded_image, "rb") as img:
             b64 = base64.b64encode(img.read()).decode("utf-8")
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text",      "text": message},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-            ]
-        })
+        messages.append({"role": "user", "content": [
+            {"type": "text", "text": message},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        ]})
     else:
-        display_msg = f"[{user}]: {message}" if chat_owner else message
-        messages.append({"role": "user", "content": display_msg})
+        messages.append({"role": "user", "content": message})
 
-    response = client.chat.completions.create(
-        model="gpt-5.4",
-        messages=messages
-    )
+    response = client.chat.completions.create(model="gpt-5.4", messages=messages)
     reply = response.choices[0].message.content
 
-    # Guardar siempre en el historial del dueño del chat
     entry = {"message": message, "reply": reply, "actor": user}
     if uploaded_text:
         entry["file"] = last_uploaded_text.get(user + "_filename", "archivo")
-    history[owner].append(entry)
+    history[user].append(entry)
     save_history(history)
 
-    # Emitir evento siempre para que quienes tengan este chat en el espejo lo vean
-    push_event(owner, "message", user, message)
+    # Notificar a quienes tengan este chat en el espejo
+    push_event(user, "message", user, message, reply)
 
-    return jsonify({"reply": reply, "saved_to": owner})
+    return jsonify({"reply": reply})
 
 
-# ── Endpoint: entrar/salir de un chat ──────────────────────────────────
+# ── Endpoint: chat efímero compartido ──────────────────────────────────
+@app.route("/shared-chat", methods=["POST"])
+def shared_chat():
+    """Mensajes dentro de una sesión compartida. NO se guardan en conversations.json."""
+    data    = request.json
+    message = data.get("message")
+    user    = data.get("user")        # quien escribe
+    owner   = data.get("owner")       # dueño del chat
+    preset  = data.get("personality", "normal")
+
+    user_presence[user] = {"last_seen": time.time(), "status": "online"}
+
+    if owner not in shared_sessions:
+        return jsonify({"error": "sesión no existe"}), 404
+
+    session          = shared_sessions[owner]
+    personality_text = get_personality_text(owner, preset)  # usa personalidad del dueño
+
+    messages = [
+        {"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH},
+        {"role": "system", "content": (
+            f"Estás en una sesión compartida entre '{owner}' y sus invitados: "
+            f"{', '.join(session['participants'])}. "
+            f"Esta conversación es efímera y no se guarda permanentemente. "
+            f"Respondé a quien escribe manteniendo contexto de toda la sesión."
+        )}
+    ]
+
+    # Historial de la sesión efímera (no del permanente)
+    for h in session["messages"][-10:]:
+        actor_label = f"[{h['actor']}]: {h['message']}"
+        messages.append({"role": "user",      "content": actor_label})
+        messages.append({"role": "assistant", "content": h["reply"]})
+
+    messages.append({"role": "user", "content": f"[{user}]: {message}"})
+
+    response = client.chat.completions.create(model="gpt-5.4", messages=messages)
+    reply = response.choices[0].message.content
+
+    # Guardar en sesión efímera (memoria, no disco)
+    session["messages"].append({
+        "actor":   user,
+        "message": message,
+        "reply":   reply,
+        "ts":      time.time()
+    })
+
+    # Emitir evento a TODOS los participantes de la sesión para que vean el mensaje
+    for participant in session["participants"]:
+        push_event(participant, "shared_message", user, message, reply)
+
+    return jsonify({"reply": reply, "ephemeral": True})
+
+
+# ── Endpoint: entrar a sesión compartida ───────────────────────────────
 @app.route("/join-chat", methods=["POST"])
 def join_chat_endpoint():
     data  = request.json
     user  = data.get("user")
     owner = data.get("owner")
+
     if not user or not owner or user == owner:
         return jsonify({"error": "datos inválidos"}), 400
-    push_event(owner, "join", user)
-    return jsonify({"status": "joined"})
 
+    # Crear sesión si no existe
+    if owner not in shared_sessions:
+        shared_sessions[owner] = {"participants": set(), "messages": []}
+
+    shared_sessions[owner]["participants"].add(user)
+    shared_sessions[owner]["participants"].add(owner)
+
+    # Notificar a TODOS en la sesión (incluyendo al dueño)
+    for participant in shared_sessions[owner]["participants"]:
+        push_event(participant, "join", user)
+
+    return jsonify({
+        "status":   "joined",
+        "history":  shared_sessions[owner]["messages"]
+    })
+
+
+# ── Endpoint: salir de sesión compartida ───────────────────────────────
 @app.route("/leave-chat", methods=["POST"])
 def leave_chat_endpoint():
     data  = request.json
     user  = data.get("user")
     owner = data.get("owner")
-    if user and owner:
-        push_event(owner, "leave", user)
+
+    if not user or not owner:
+        return jsonify({"status": "ok"})
+
+    if owner in shared_sessions:
+        shared_sessions[owner]["participants"].discard(user)
+
+        # Notificar a los que quedan
+        for participant in shared_sessions[owner]["participants"]:
+            push_event(participant, "leave", user)
+
+        # Si no queda nadie (o solo el dueño), destruir la sesión
+        remaining = shared_sessions[owner]["participants"] - {owner}
+        if not remaining:
+            del shared_sessions[owner]
+
     return jsonify({"status": "left"})
+
+
+# ── Endpoint: historial efímero de sesión ──────────────────────────────
+@app.route("/shared-history/<owner>")
+def get_shared_history(owner):
+    if owner not in shared_sessions:
+        return jsonify([])
+    return jsonify(shared_sessions[owner]["messages"])
 
 
 # ── Endpoint: polling de eventos ───────────────────────────────────────
 @app.route("/events/<owner>")
 def get_events(owner):
-    """El frontend hace polling cada 3s para ver si hay nuevos mensajes/eventos."""
     since = float(request.args.get("since", 0))
     events = load_events()
     owner_events = [e for e in events.get(owner, []) if e["ts"] > since]
     return jsonify(owner_events)
 
 
-# ── Endpoint: personalidad ─────────────────────────────────────────────
+# ── Endpoint: notificar mensaje propio ─────────────────────────────────
+@app.route("/notify-message", methods=["POST"])
+def notify_message():
+    data  = request.json
+    owner = data.get("owner")
+    actor = data.get("actor")
+    reply = data.get("reply", "")
+    msg   = data.get("message", "")
+    if owner and actor:
+        push_event(owner, "message", actor, msg, reply)
+    return jsonify({"status": "ok"})
+
+
+# ── Endpoint: personalidad ──────────────────────────────────────────────
 @app.route("/personality/<user>", methods=["GET"])
 def get_user_personality(user):
     personalities = load_personalities()
@@ -293,7 +363,7 @@ def clear_user_personality(user):
     return jsonify({"status": "cleared"})
 
 
-# ── Endpoint: upload ───────────────────────────────────────────────────
+# ── Endpoint: upload ────────────────────────────────────────────────────
 @app.route("/upload", methods=["POST"])
 def upload():
     file = request.files["file"]
@@ -303,8 +373,8 @@ def upload():
     path = os.path.join("uploads", file.filename)
     file.save(path)
 
-    last_uploaded_text[user]              = ""
-    last_uploaded_image[user]             = None
+    last_uploaded_text[user]               = ""
+    last_uploaded_image[user]              = None
     last_uploaded_text[user + "_filename"] = file.filename
 
     filename = file.filename.lower()
@@ -335,7 +405,7 @@ def upload():
     return jsonify({"status": "uploaded", "filename": file.filename})
 
 
-# ── Endpoint: historial ────────────────────────────────────────────────
+# ── Endpoint: historial permanente ─────────────────────────────────────
 @app.route("/history")
 def get_all_history():
     return jsonify(load_history())
@@ -353,7 +423,7 @@ def delete_user(user):
     return jsonify({"status": "deleted"})
 
 
-# ── Endpoint: presencia ────────────────────────────────────────────────
+# ── Endpoint: presencia ─────────────────────────────────────────────────
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
     data   = request.json
@@ -370,6 +440,12 @@ def set_offline():
     user = data.get("user")
     if user:
         user_presence[user] = {"last_seen": time.time(), "status": "offline"}
+        # Si era dueño de sesión, limpiarla
+        if user in shared_sessions:
+            for participant in shared_sessions[user]["participants"]:
+                if participant != user:
+                    push_event(participant, "session_ended", user)
+            del shared_sessions[user]
     return jsonify({"status": "ok"})
 
 @app.route("/users")
@@ -382,18 +458,7 @@ def users():
     return jsonify(result)
 
 
-# ── Endpoint: notificar mensaje propio (para espectadores del espejo) ────
-@app.route("/notify-message", methods=["POST"])
-def notify_message():
-    data  = request.json
-    owner = data.get("owner")
-    actor = data.get("actor")
-    if owner and actor:
-        push_event(owner, "message", actor, "")
-    return jsonify({"status": "ok"})
-
-
-# ── Home ───────────────────────────────────────────────────────────────
+# ── Home ────────────────────────────────────────────────────────────────
 @app.route("/")
 def home():
     return "AI Backend Running"
