@@ -16,6 +16,7 @@ HISTORY_FILE      = "conversations.json"
 PERSONALITIES_FILE = "personalities.json"
 EVENTS_FILE       = "events.json"
 CHANNELS_FILE     = "channels.json"
+DMS_FILE          = "dms.json"
 
 user_presence       = {}
 last_uploaded_text  = {}
@@ -38,6 +39,8 @@ def load_history():    return load_json(HISTORY_FILE, {})
 def save_history(d):   save_json(HISTORY_FILE, d)
 def load_channels():   return load_json(CHANNELS_FILE, {})
 def save_channels(d):  save_json(CHANNELS_FILE, d)
+def load_dms():        return load_json(DMS_FILE, {})
+def save_dms(d):       save_json(DMS_FILE, d)
 def load_personalities(): return load_json(PERSONALITIES_FILE, {})
 def save_personalities(d): save_json(PERSONALITIES_FILE, d)
 
@@ -374,6 +377,44 @@ def users():
         {"name": u, "status": get_status(e)}
         for u, e in user_presence.items() if u
     ])
+
+
+# ── Mensajes directos (DM) ────────────────────────────────────────────────
+def dm_key(a, b):
+    """Clave de conversación ordenada alfabéticamente para que sea simétrica."""
+    return "__".join(sorted([a, b]))
+
+@app.route("/dm/<other_user>", methods=["GET"])
+def get_dm(other_user):
+    user = request.args.get("user")
+    if not user:
+        return jsonify({"error": "missing user"}), 400
+    key  = dm_key(user, other_user)
+    dms  = load_dms()
+    return jsonify(dms.get(key, []))
+
+@app.route("/dm/<other_user>", methods=["POST"])
+def send_dm(other_user):
+    data    = request.json
+    sender  = data.get("from")
+    message = data.get("message", "").strip()
+    if not sender or not message:
+        return jsonify({"error": "faltan datos"}), 400
+
+    key  = dm_key(sender, other_user)
+    dms  = load_dms()
+    if key not in dms:
+        dms[key] = []
+
+    entry = {"from": sender, "message": message, "ts": time.time()}
+    dms[key].append(entry)
+    save_dms(dms)
+
+    # Notificar al destinatario en tiempo real
+    push_event(other_user, "dm", sender, message=message, conv_key=key)
+
+    return jsonify({"status": "sent", "entry": entry})
+
 
 @app.route("/")
 def home():
