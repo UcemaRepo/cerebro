@@ -161,11 +161,59 @@ def chat():
 
     reply = response.choices[0].message.content
 
-    user_history.append({"message": message, "reply": reply})
-    history[user] = user_history
+    # Feature 2: si hay herencia, guardar en el historial del usuario original
+    save_user = inherited_from if inherited_from else user
+    if save_user not in history:
+        history[save_user] = []
+    history[save_user].append({"message": message, "reply": reply})
     save_history(history)
 
     return jsonify({"reply": reply})
+
+
+# ── Endpoint: consultar sobre otro usuario ─────────────
+@app.route("/ask-about", methods=["POST"])
+def ask_about():
+    data = request.json
+    asker = data.get("user")
+    target = data.get("target_user")
+    message = data.get("message")
+    preset = data.get("personality", "normal")
+
+    if not asker or not target or not message:
+        return jsonify({"error": "faltan datos"}), 400
+
+    history = load_history()
+    personality_text = get_personality_text(asker, preset)
+    target_history = history.get(target, [])
+
+    if not target_history:
+        return jsonify({"reply": f"No tengo conversaciones registradas de {target} todavía."})
+
+    resumen = f"Historial de conversaciones de '{target}':\n\n"
+    for i, h in enumerate(target_history[-20:], 1):
+        resumen += f"[{i}] Usuario: {h['message']}\n    Bot: {h['reply']}\n\n"
+
+    messages = [
+        {"role": "system", "content": personality_text},
+        {"role": "system", "content": f"Se te proporciona el historial de '{target}' para responder preguntas de '{asker}' sobre ese usuario. No hables con '{target}', sino con '{asker}'."},
+        {"role": "system", "content": resumen},
+        {"role": "user", "content": message}
+    ]
+
+    response = client.chat.completions.create(
+        model="gpt-5.4",
+        messages=messages
+    )
+
+    reply = response.choices[0].message.content
+
+    if asker not in history:
+        history[asker] = []
+    history[asker].append({"message": message, "reply": reply})
+    save_history(history)
+
+    return jsonify({"reply": reply, "about": target})
 
 
 # ── Endpoint: personalidad ──────────────────────────────
