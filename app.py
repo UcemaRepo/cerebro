@@ -113,7 +113,7 @@ def chat():
         messages.append({"role":"user","content":message})
 
     response = client.chat.completions.create(
-        model="gpt-5",
+        model="gpt-4o",
         messages=messages
     )
 
@@ -197,23 +197,16 @@ def get_all_history():
     return jsonify(load_history())
 
 
+# BUG FIX: antes iteraba el dict como lista de objetos, nunca retornaba nada
 @app.route("/history/<user>")
 def get_user_history(user):
 
     history = load_history()
 
-    user_history = []
-
-    for h in history:
-
-        if isinstance(h, dict) and h.get("user") == user:
-            user_history.append(h)
+    # El historial está guardado como history[username] = [{message, reply}, ...]
+    user_history = history.get(user, [])
 
     return jsonify(user_history)
-
-
-
-
 
 
 @app.route("/users")
@@ -257,6 +250,7 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
