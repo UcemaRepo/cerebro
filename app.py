@@ -11,20 +11,18 @@ CORS(app)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-DATA_FILE = "conversations.json"
+DATA_FILE        = "conversations.json"
 PERSONALITIES_FILE = "personalities.json"
+EVENTS_FILE      = "events.json"       # feed de eventos en tiempo real
 
-# Estados de presencia por usuario
-user_presence = {}
-
-# Archivos subidos por usuario (en lugar de global)
-last_uploaded_text = {}
+user_presence    = {}
+last_uploaded_text  = {}
 last_uploaded_image = {}
 
 AWAY_THRESHOLD = 300  # 5 minutos
 
 
-# ── Historial ──────────────────────────────────────────
+# ── Historial ──────────────────────────────────────────────────────────
 def load_history():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -36,14 +34,41 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
-# ── Personalidades ─────────────────────────────────────
+# ── Eventos en tiempo real ─────────────────────────────────────────────
+# Estructura: { "owner": [ {type, actor, text, ts}, ... ] }
+def load_events():
+    if not os.path.exists(EVENTS_FILE):
+        return {}
+    with open(EVENTS_FILE, "r") as f:
+        return json.load(f)
+
+def save_events(events):
+    with open(EVENTS_FILE, "w") as f:
+        json.dump(events, f, indent=2)
+
+def push_event(owner, event_type, actor, text=""):
+    events = load_events()
+    if owner not in events:
+        events[owner] = []
+    events[owner].append({
+        "type":  event_type,   # "join" | "leave" | "message"
+        "actor": actor,
+        "text":  text,
+        "ts":    time.time()
+    })
+    # Mantener solo los últimos 50 eventos por chat
+    events[owner] = events[owner][-50:]
+    save_events(events)
+
+
+# ── Personalidades ─────────────────────────────────────────────────────
 PRESET_PERSONALITIES = {
-    "normal":   "Eres un asistente util, claro y amable.",
+    "normal":   "Eres un asistente útil, claro y amable.",
     "analyst":  "Eres un analista experto. Respondés con datos, métricas y razonamiento estructurado. Usás tablas comparativas cuando es útil.",
     "creative": "Eres un asistente creativo y disruptivo. Das ideas originales, fuera de lo convencional, con entusiasmo.",
     "strict":   "Eres un asistente estricto y conciso. Respondés solo lo necesario, sin rodeos.",
-    "dev":      "Eres un desarrollador senior. Respondés con código limpio, explicaciones técnicas precisas y buenas prácticas.",
-    "coach":    "Eres un coach ejecutivo. Hacés preguntas poderosas, motivás y ayudás a estructurar objetivos y planes de acción.",
+    "dev":      "Eres un desarrollador senior. Respondés con código limpio, explicaciones técnicas y buenas prácticas.",
+    "coach":    "Eres un coach ejecutivo. Hacés preguntas poderosas, motivás y ayudás a estructurar objetivos.",
 }
 
 def load_personalities():
@@ -64,7 +89,7 @@ def get_personality_text(user, preset_key):
     return PRESET_PERSONALITIES.get(preset_key, PRESET_PERSONALITIES["normal"])
 
 
-# ── Sistema de respuestas enriquecidas ─────────────────
+# ── Respuestas enriquecidas ─────────────────────────────────────────────
 SYSTEM_RICH = """
 Podés enriquecer tus respuestas con estas etiquetas especiales cuando aporten valor real:
 
@@ -74,64 +99,94 @@ Columna1 | Columna2 | Columna3
 Valor1   | Valor2   | Valor3
 </table>
 
-Widget informativo (resumen, dato clave, alerta):
+Widget informativo:
 <widget title="Título">Contenido del widget</widget>
 
-Archivo descargable (código, texto, CSV generado, etc.):
+Archivo descargable:
 <download filename="archivo.txt">Contenido del archivo</download>
 
-Usá estas etiquetas solo cuando aporten valor concreto. El texto normal va sin etiquetas.
+Usá estas etiquetas solo cuando aporten valor concreto.
 """
 
 
-# ── Presencia ──────────────────────────────────────────
+# ── Presencia ──────────────────────────────────────────────────────────
 def get_status(entry):
     if entry.get("status") == "offline":
         return "offline"
     elapsed = time.time() - entry.get("last_seen", 0)
-    if elapsed > AWAY_THRESHOLD:
-        return "away"
-    return "online"
+    return "away" if elapsed > AWAY_THRESHOLD else "online"
 
 
-# ── Endpoint: chat ──────────────────────────────────────
+# ── Contexto de todos los usuarios (para consultas naturales) ──────────
+def build_users_context(history, known_users):
+    """Construye un resumen del historial de todos los usuarios para que el bot
+    pueda responder preguntas sobre ellos de forma natural, sin endpoint especial."""
+    if not known_users:
+        return ""
+    lines = ["=== Historial de otros usuarios (contexto de referencia) ==="]
+    for u in known_users:
+        u_history = history.get(u, [])
+        if not u_history:
+            continue
+        lines.append(f"\n--- {u} ---")
+        for h in u_history[-15:]:
+            lines.append(f"  [{u}]: {h['message']}")
+            lines.append(f"  [Bot]: {h['reply']}")
+            # Incluir referencia a archivos si los hay
+            if h.get("file"):
+                lines.append(f"  [Archivo subido]: {h['file']}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+# ── Endpoint: chat principal ────────────────────────────────────────────
 @app.route("/chat", methods=["POST"])
 def chat():
-    data = request.json
-    message = data.get("message")
-    user = data.get("user")
-    preset = data.get("personality", "normal")
-    inherited_from = data.get("inherited_from")  # usuario cuyo historial se hereda
+    data          = request.json
+    message       = data.get("message")
+    user          = data.get("user")
+    preset        = data.get("personality", "normal")
+    # chat_owner: si está seteado, el usuario está dentro del chat de otra persona
+    chat_owner    = data.get("chat_owner")
 
-    # Actualizar presencia
     user_presence[user] = {"last_seen": time.time(), "status": "online"}
 
-    history = load_history()
+    history          = load_history()
     personality_text = get_personality_text(user, preset)
+    all_users        = [u for u in history.keys() if u != user]
 
-    if user not in history:
-        history[user] = []
+    # El dueño del chat donde se escribe (puede ser el propio usuario u otro)
+    owner = chat_owner if chat_owner else user
 
-    user_history = history[user]
+    if owner not in history:
+        history[owner] = []
 
-    # Contexto: si hay herencia, usar historial del usuario original
-    context_user = inherited_from if inherited_from else user
-    context_history = history.get(context_user, [])
+    owner_history = history[owner]
 
-    messages = [
-        {"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH}
-    ]
+    # Construir mensajes para el modelo
+    messages = [{"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH}]
 
-    if inherited_from:
+    if chat_owner:
         messages.append({
             "role": "system",
-            "content": f"Estás siendo consultado por '{user}', que está continuando la conversación iniciada por '{inherited_from}'. Tenés acceso a todo el historial anterior y debés mantener el contexto completo."
+            "content": (
+                f"'{user}' se unió al chat de '{chat_owner}' y está escribiendo en él. "
+                f"Continuá la conversación con pleno contexto del historial."
+            )
         })
 
-    for h in context_history[-10:]:
-        messages.append({"role": "user", "content": h["message"]})
+    # Historial del chat donde se está escribiendo
+    for h in owner_history[-10:]:
+        actor = h.get("actor", owner)
+        msg_text = f"[{actor}]: {h['message']}" if chat_owner else h["message"]
+        messages.append({"role": "user",      "content": msg_text})
         messages.append({"role": "assistant", "content": h["reply"]})
 
+    # Contexto de otros usuarios para consultas naturales
+    users_ctx = build_users_context(history, all_users)
+    if users_ctx:
+        messages.append({"role": "system", "content": users_ctx})
+
+    # Archivo subido
     uploaded_text = last_uploaded_text.get(user, "")
     if uploaded_text:
         messages.append({
@@ -147,93 +202,79 @@ def chat():
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": message},
+                {"type": "text",      "text": message},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
             ]
         })
     else:
-        messages.append({"role": "user", "content": message})
+        display_msg = f"[{user}]: {message}" if chat_owner else message
+        messages.append({"role": "user", "content": display_msg})
 
     response = client.chat.completions.create(
         model="gpt-5.4",
         messages=messages
     )
-
     reply = response.choices[0].message.content
 
-    # Feature 2: si hay herencia, guardar en el historial del usuario original
-    save_user = inherited_from if inherited_from else user
-    if save_user not in history:
-        history[save_user] = []
-    history[save_user].append({"message": message, "reply": reply})
+    # Guardar siempre en el historial del dueño del chat
+    entry = {"message": message, "reply": reply, "actor": user}
+    if uploaded_text:
+        entry["file"] = last_uploaded_text.get(user + "_filename", "archivo")
+    history[owner].append(entry)
     save_history(history)
 
-    return jsonify({"reply": reply})
+    # Emitir evento para que los demás vean el mensaje en tiempo real
+    if chat_owner:
+        push_event(owner, "message", user, message)
+
+    return jsonify({"reply": reply, "saved_to": owner})
 
 
-# ── Endpoint: consultar sobre otro usuario ─────────────
-@app.route("/ask-about", methods=["POST"])
-def ask_about():
-    data = request.json
-    asker = data.get("user")
-    target = data.get("target_user")
-    message = data.get("message")
-    preset = data.get("personality", "normal")
+# ── Endpoint: entrar/salir de un chat ──────────────────────────────────
+@app.route("/join-chat", methods=["POST"])
+def join_chat_endpoint():
+    data  = request.json
+    user  = data.get("user")
+    owner = data.get("owner")
+    if not user or not owner or user == owner:
+        return jsonify({"error": "datos inválidos"}), 400
+    push_event(owner, "join", user)
+    return jsonify({"status": "joined"})
 
-    if not asker or not target or not message:
-        return jsonify({"error": "faltan datos"}), 400
-
-    history = load_history()
-    personality_text = get_personality_text(asker, preset)
-    target_history = history.get(target, [])
-
-    if not target_history:
-        return jsonify({"reply": f"No tengo conversaciones registradas de {target} todavía."})
-
-    resumen = f"Historial de conversaciones de '{target}':\n\n"
-    for i, h in enumerate(target_history[-20:], 1):
-        resumen += f"[{i}] Usuario: {h['message']}\n    Bot: {h['reply']}\n\n"
-
-    messages = [
-        {"role": "system", "content": personality_text},
-        {"role": "system", "content": f"Se te proporciona el historial de '{target}' para responder preguntas de '{asker}' sobre ese usuario. No hables con '{target}', sino con '{asker}'."},
-        {"role": "system", "content": resumen},
-        {"role": "user", "content": message}
-    ]
-
-    response = client.chat.completions.create(
-        model="gpt-5.4",
-        messages=messages
-    )
-
-    reply = response.choices[0].message.content
-
-    if asker not in history:
-        history[asker] = []
-    history[asker].append({"message": message, "reply": reply})
-    save_history(history)
-
-    return jsonify({"reply": reply, "about": target})
+@app.route("/leave-chat", methods=["POST"])
+def leave_chat_endpoint():
+    data  = request.json
+    user  = data.get("user")
+    owner = data.get("owner")
+    if user and owner:
+        push_event(owner, "leave", user)
+    return jsonify({"status": "left"})
 
 
-# ── Endpoint: personalidad ──────────────────────────────
+# ── Endpoint: polling de eventos ───────────────────────────────────────
+@app.route("/events/<owner>")
+def get_events(owner):
+    """El frontend hace polling cada 3s para ver si hay nuevos mensajes/eventos."""
+    since = float(request.args.get("since", 0))
+    events = load_events()
+    owner_events = [e for e in events.get(owner, []) if e["ts"] > since]
+    return jsonify(owner_events)
+
+
+# ── Endpoint: personalidad ─────────────────────────────────────────────
 @app.route("/personality/<user>", methods=["GET"])
 def get_user_personality(user):
     personalities = load_personalities()
     entry = personalities.get(user, {})
-    return jsonify({
-        "custom": entry.get("custom", ""),
-        "presets": PRESET_PERSONALITIES
-    })
+    return jsonify({"custom": entry.get("custom", ""), "presets": PRESET_PERSONALITIES})
 
 @app.route("/personality/<user>", methods=["POST"])
 def set_user_personality(user):
     data = request.json
-    custom_text = data.get("custom", "").strip()
     personalities = load_personalities()
     if user not in personalities:
         personalities[user] = {}
-    personalities[user]["custom"] = custom_text
+    personalities[user]["custom"] = data.get("custom", "").strip()
     save_personalities(personalities)
     return jsonify({"status": "ok"})
 
@@ -246,7 +287,7 @@ def clear_user_personality(user):
     return jsonify({"status": "cleared"})
 
 
-# ── Endpoint: upload ────────────────────────────────────
+# ── Endpoint: upload ───────────────────────────────────────────────────
 @app.route("/upload", methods=["POST"])
 def upload():
     file = request.files["file"]
@@ -256,16 +297,17 @@ def upload():
     path = os.path.join("uploads", file.filename)
     file.save(path)
 
-    last_uploaded_text[user] = ""
-    last_uploaded_image[user] = None
+    last_uploaded_text[user]              = ""
+    last_uploaded_image[user]             = None
+    last_uploaded_text[user + "_filename"] = file.filename
 
     filename = file.filename.lower()
 
-    if filename.endswith(".txt") or filename.endswith(".csv"):
+    if filename.endswith((".txt", ".csv")):
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             last_uploaded_text[user] = f.read()
 
-    elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+    elif filename.endswith((".xlsx", ".xls")):
         wb = openpyxl.load_workbook(path, data_only=True)
         sheets_text = []
         for sheet_name in wb.sheetnames:
@@ -284,18 +326,17 @@ def upload():
     else:
         return jsonify({"error": "Tipo de archivo no soportado"}), 400
 
-    return jsonify({"status": "uploaded"})
+    return jsonify({"status": "uploaded", "filename": file.filename})
 
 
-# ── Endpoint: historial ─────────────────────────────────
+# ── Endpoint: historial ────────────────────────────────────────────────
 @app.route("/history")
 def get_all_history():
     return jsonify(load_history())
 
 @app.route("/history/<user>")
 def get_user_history(user):
-    history = load_history()
-    return jsonify(history.get(user, []))
+    return jsonify(load_history().get(user, []))
 
 @app.route("/delete/<user>", methods=["DELETE"])
 def delete_user(user):
@@ -306,26 +347,19 @@ def delete_user(user):
     return jsonify({"status": "deleted"})
 
 
-# ── Endpoint: presencia ─────────────────────────────────
+# ── Endpoint: presencia ────────────────────────────────────────────────
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
-    """Llamado periódicamente por el frontend. active=False cuando la pestaña está en segundo plano sin actividad."""
-    data = request.json
-    user = data.get("user")
+    data   = request.json
+    user   = data.get("user")
     active = data.get("active", True)
-
     if not user:
         return jsonify({"error": "missing user"}), 400
-
-    user_presence[user] = {
-        "last_seen": time.time(),
-        "status": "online" if active else "away"
-    }
+    user_presence[user] = {"last_seen": time.time(), "status": "online" if active else "away"}
     return jsonify({"status": "ok"})
 
 @app.route("/offline", methods=["POST"])
 def set_offline():
-    """Llamado en beforeunload para marcar desconexión inmediata."""
     data = request.json
     user = data.get("user")
     if user:
@@ -336,13 +370,13 @@ def set_offline():
 def users():
     result = []
     for user, entry in user_presence.items():
-        if not user:   # ignorar entradas fantasma
+        if not user:
             continue
         result.append({"name": user, "status": get_status(entry)})
     return jsonify(result)
 
 
-# ── Home ────────────────────────────────────────────────
+# ── Home ───────────────────────────────────────────────────────────────
 @app.route("/")
 def home():
     return "AI Backend Running"
