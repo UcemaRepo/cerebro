@@ -101,6 +101,7 @@ def chat():
     message = data.get("message")
     user = data.get("user")
     preset = data.get("personality", "normal")
+    inherited_from = data.get("inherited_from")  # usuario cuyo historial se hereda
 
     # Actualizar presencia
     user_presence[user] = {"last_seen": time.time(), "status": "online"}
@@ -113,11 +114,21 @@ def chat():
 
     user_history = history[user]
 
+    # Contexto: si hay herencia, usar historial del usuario original
+    context_user = inherited_from if inherited_from else user
+    context_history = history.get(context_user, [])
+
     messages = [
         {"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH}
     ]
 
-    for h in user_history[-10:]:
+    if inherited_from:
+        messages.append({
+            "role": "system",
+            "content": f"Estás siendo consultado por '{user}', que está continuando la conversación iniciada por '{inherited_from}'. Tenés acceso a todo el historial anterior y debés mantener el contexto completo."
+        })
+
+    for h in context_history[-10:]:
         messages.append({"role": "user", "content": h["message"]})
         messages.append({"role": "assistant", "content": h["reply"]})
 
@@ -287,7 +298,6 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
 
 
 
