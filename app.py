@@ -223,9 +223,8 @@ def chat():
     history[owner].append(entry)
     save_history(history)
 
-    # Emitir evento para que los demás vean el mensaje en tiempo real
-    if chat_owner:
-        push_event(owner, "message", user, message)
+    # Emitir evento siempre para que quienes tengan este chat en el espejo lo vean
+    push_event(owner, "message", user, message)
 
     return jsonify({"reply": reply, "saved_to": owner})
 
@@ -374,6 +373,17 @@ def users():
             continue
         result.append({"name": user, "status": get_status(entry)})
     return jsonify(result)
+
+
+# ── Endpoint: notificar mensaje propio (para espectadores del espejo) ────
+@app.route("/notify-message", methods=["POST"])
+def notify_message():
+    data  = request.json
+    owner = data.get("owner")
+    actor = data.get("actor")
+    if owner and actor:
+        push_event(owner, "message", actor, "")
+    return jsonify({"status": "ok"})
 
 
 # ── Home ───────────────────────────────────────────────────────────────
