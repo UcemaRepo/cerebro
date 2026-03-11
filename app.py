@@ -12,46 +12,41 @@ CORS(app)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-DATA_FILE          = "conversations.json"
+HISTORY_FILE      = "conversations.json"
 PERSONALITIES_FILE = "personalities.json"
-EVENTS_FILE        = "events.json"
+EVENTS_FILE       = "events.json"
+CHANNELS_FILE     = "channels.json"
 
 user_presence       = {}
 last_uploaded_text  = {}
 last_uploaded_image = {}
-
-AWAY_THRESHOLD = 300
-
-# ── Salas efímeras ─────────────────────────────────────────────────────
-# { room_id: { name, creator, participants: set(), messages: [], created_at } }
-rooms = {}
+AWAY_THRESHOLD      = 300
 
 
-# ── Historial permanente ────────────────────────────────────────────────
-def load_history():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    with open(DATA_FILE, "r") as f:
+# ── Persistencia genérica ───────────────────────────────────────────────
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path) as f:
         return json.load(f)
 
-def save_history(history):
-    with open(DATA_FILE, "w") as f:
-        json.dump(history, f, indent=2)
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+def load_history():    return load_json(HISTORY_FILE, {})
+def save_history(d):   save_json(HISTORY_FILE, d)
+def load_channels():   return load_json(CHANNELS_FILE, {})
+def save_channels(d):  save_json(CHANNELS_FILE, d)
+def load_personalities(): return load_json(PERSONALITIES_FILE, {})
+def save_personalities(d): save_json(PERSONALITIES_FILE, d)
 
 
-# ── Eventos en tiempo real ──────────────────────────────────────────────
-def load_events():
-    if not os.path.exists(EVENTS_FILE):
-        return {}
-    with open(EVENTS_FILE, "r") as f:
-        return json.load(f)
-
-def save_events(events):
-    with open(EVENTS_FILE, "w") as f:
-        json.dump(events, f, indent=2)
+# ── Eventos ──────────────────────────────────────────────────────────────
+def load_events():   return load_json(EVENTS_FILE, {})
+def save_events(d):  save_json(EVENTS_FILE, d)
 
 def push_event(target_user, event_type, actor, **kwargs):
-    """Push an event to a specific user's event queue."""
     events = load_events()
     if target_user not in events:
         events[target_user] = []
@@ -61,94 +56,66 @@ def push_event(target_user, event_type, actor, **kwargs):
     events[target_user] = events[target_user][-100:]
     save_events(events)
 
-def broadcast_to_room(room_id, event_type, actor, **kwargs):
-    """Push an event to every participant of a room."""
-    if room_id not in rooms:
-        return
-    for participant in rooms[room_id]["participants"]:
-        push_event(participant, event_type, actor, room_id=room_id, **kwargs)
+def broadcast(users, event_type, actor, **kwargs):
+    for u in users:
+        push_event(u, event_type, actor, **kwargs)
 
 
-# ── Personalidades ──────────────────────────────────────────────────────
+# ── Personalidades ────────────────────────────────────────────────────────
 PRESET_PERSONALITIES = {
     "normal":   "Eres un asistente útil, claro y amable.",
-    "analyst":  "Eres un analista experto. Respondés con datos, métricas y razonamiento estructurado. Usás tablas comparativas cuando es útil.",
+    "analyst":  "Eres un analista experto. Respondés con datos y razonamiento estructurado. Usás tablas comparativas cuando es útil.",
     "creative": "Eres un asistente creativo y disruptivo. Das ideas originales, fuera de lo convencional.",
     "strict":   "Eres un asistente estricto y conciso. Respondés solo lo necesario, sin rodeos.",
     "dev":      "Eres un desarrollador senior. Respondés con código limpio y buenas prácticas.",
     "coach":    "Eres un coach ejecutivo. Hacés preguntas poderosas y ayudás a estructurar objetivos.",
 }
 
-def load_personalities():
-    if not os.path.exists(PERSONALITIES_FILE):
-        return {}
-    with open(PERSONALITIES_FILE, "r") as f:
-        return json.load(f)
-
-def save_personalities(p):
-    with open(PERSONALITIES_FILE, "w") as f:
-        json.dump(p, f, indent=2)
-
 def get_personality_text(user, preset_key):
-    personalities = load_personalities()
-    custom = personalities.get(user, {}).get("custom", "").strip()
-    if custom:
-        return custom
-    return PRESET_PERSONALITIES.get(preset_key, PRESET_PERSONALITIES["normal"])
+    custom = load_personalities().get(user, {}).get("custom", "").strip()
+    return custom if custom else PRESET_PERSONALITIES.get(preset_key, PRESET_PERSONALITIES["normal"])
 
 
-# ── Respuestas enriquecidas ─────────────────────────────────────────────
+# ── Sistema rich ──────────────────────────────────────────────────────────
 SYSTEM_RICH = """
-Podés enriquecer tus respuestas con estas etiquetas especiales cuando aporten valor real:
+Podés enriquecer tus respuestas con estas etiquetas cuando aporten valor:
 
-Tabla comparativa:
+Tabla:
 <table>
-Columna1 | Columna2 | Columna3
-Valor1   | Valor2   | Valor3
+Col1 | Col2 | Col3
+Val1 | Val2 | Val3
 </table>
 
-Widget informativo (dato clave, resumen, alerta):
-<widget title="Título">Contenido del widget</widget>
+Widget:
+<widget title="Título">Contenido</widget>
 
-Archivo descargable — REGLAS:
-- Usá SOLO: .txt, .csv, .md, .json, .html
-- NUNCA: .docx, .xlsx, .pptx (son binarios)
-- Para tablas → .csv | Para documentos → .md o .html
-
+Archivo descargable (solo .txt .csv .md .json .html — NUNCA .docx .xlsx .pptx):
 <download filename="datos.csv">col1,col2
-valor1,valor2</download>
-
-Usá estas etiquetas solo cuando aporten valor concreto.
+val1,val2</download>
 """
 
 
-# ── Presencia ───────────────────────────────────────────────────────────
+# ── Presencia ─────────────────────────────────────────────────────────────
 def get_status(entry):
     if entry.get("status") == "offline":
         return "offline"
-    elapsed = time.time() - entry.get("last_seen", 0)
-    return "away" if elapsed > AWAY_THRESHOLD else "online"
+    return "away" if time.time() - entry.get("last_seen", 0) > AWAY_THRESHOLD else "online"
 
 
-# ── Contexto de usuarios para consultas naturales ──────────────────────
+# ── Contexto cruzado de usuarios ──────────────────────────────────────────
 def build_users_context(history, known_users):
-    if not known_users:
-        return ""
-    lines = ["=== Historial de otros usuarios (contexto de referencia) ==="]
+    lines = ["=== Historial de otros usuarios ==="]
     for u in known_users:
-        u_history = history.get(u, [])
-        if not u_history:
-            continue
+        h = history.get(u, [])
+        if not h: continue
         lines.append(f"\n--- {u} ---")
-        for h in u_history[-15:]:
-            lines.append(f"  [{u}]: {h['message']}")
-            lines.append(f"  [Bot]: {h['reply']}")
-            if h.get("file"):
-                lines.append(f"  [Archivo]: {h['file']}")
+        for m in h[-10:]:
+            lines.append(f"  [{u}]: {m['message']}")
+            lines.append(f"  [Bot]: {m['reply']}")
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-# ── Endpoint: chat propio (historial permanente) ────────────────────────
+# ── Chat personal (historial permanente) ─────────────────────────────────
 @app.route("/chat", methods=["POST"])
 def chat():
     data    = request.json
@@ -157,42 +124,38 @@ def chat():
     preset  = data.get("personality", "normal")
 
     user_presence[user] = {"last_seen": time.time(), "status": "online"}
-
-    history          = load_history()
-    personality_text = get_personality_text(user, preset)
-    all_users        = [u for u in history.keys() if u != user]
-
+    history = load_history()
     if user not in history:
         history[user] = []
 
-    messages = [{"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH}]
+    msgs = [{"role": "system", "content": get_personality_text(user, preset) + "\n\n" + SYSTEM_RICH}]
 
     for h in history[user][-10:]:
-        messages.append({"role": "user",      "content": h["message"]})
-        messages.append({"role": "assistant", "content": h["reply"]})
+        msgs.append({"role": "user",      "content": h["message"]})
+        msgs.append({"role": "assistant", "content": h["reply"]})
 
-    users_ctx = build_users_context(history, all_users)
-    if users_ctx:
-        messages.append({"role": "system", "content": users_ctx})
+    ctx = build_users_context(history, [u for u in history if u != user])
+    if ctx:
+        msgs.append({"role": "system", "content": ctx})
 
     uploaded_text = last_uploaded_text.get(user, "")
     if uploaded_text:
-        messages.append({"role": "system", "content": "Documento subido:\n\n" + uploaded_text})
+        msgs.append({"role": "system", "content": "Documento:\n\n" + uploaded_text})
 
     uploaded_image = last_uploaded_image.get(user)
     if uploaded_image:
         import base64
         with open(uploaded_image, "rb") as img:
-            b64 = base64.b64encode(img.read()).decode("utf-8")
-        messages.append({"role": "user", "content": [
+            b64 = base64.b64encode(img.read()).decode()
+        msgs.append({"role": "user", "content": [
             {"type": "text", "text": message},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
         ]})
     else:
-        messages.append({"role": "user", "content": message})
+        msgs.append({"role": "user", "content": message})
 
-    response = client.chat.completions.create(model="gpt-5.4", messages=messages)
-    reply = response.choices[0].message.content
+    resp  = client.chat.completions.create(model="gpt-5.4", messages=msgs)
+    reply = resp.choices[0].message.content
 
     entry = {"message": message, "reply": reply, "actor": user}
     if uploaded_text:
@@ -200,241 +163,201 @@ def chat():
     history[user].append(entry)
     save_history(history)
 
-    # Notificar espejo pasivo
     push_event(user, "mirror_update", user, message=message, reply=reply)
+    return jsonify({"reply": reply})
+
+
+# ── Canales (permanentes, guardados en disco) ─────────────────────────────
+@app.route("/channels", methods=["GET"])
+def list_channels():
+    return jsonify(load_channels())
+
+@app.route("/channels", methods=["POST"])
+def create_channel():
+    data    = request.json
+    user    = data.get("user")
+    name    = data.get("name", "").strip() or f"canal-de-{user}"
+    # Limpiar nombre: minúsculas, sin espacios
+    slug    = name.lower().replace(" ", "-")
+    channels = load_channels()
+
+    # No duplicar slugs
+    if slug in channels:
+        return jsonify({"error": "Ya existe un canal con ese nombre"}), 400
+
+    channels[slug] = {
+        "id":       slug,
+        "name":     name,
+        "creator":  user,
+        "created":  time.time(),
+        "messages": [],
+    }
+    save_channels(channels)
+
+    # Notificar a todos los usuarios online
+    for u in user_presence:
+        push_event(u, "channel_created", user, channel_id=slug, channel_name=name)
+
+    return jsonify({"id": slug, "name": name})
+
+@app.route("/channels/<channel_id>", methods=["GET"])
+def get_channel(channel_id):
+    channels = load_channels()
+    ch = channels.get(channel_id)
+    if not ch:
+        return jsonify({"error": "Canal no existe"}), 404
+    return jsonify(ch)
+
+@app.route("/channels/<channel_id>", methods=["DELETE"])
+def delete_channel(channel_id):
+    data     = request.json or {}
+    user     = data.get("user")
+    channels = load_channels()
+    ch       = channels.get(channel_id)
+
+    if not ch:
+        return jsonify({"error": "Canal no existe"}), 404
+    if ch["creator"] != user:
+        return jsonify({"error": "Solo el creador puede borrar el canal"}), 403
+
+    del channels[channel_id]
+    save_channels(channels)
+
+    for u in user_presence:
+        push_event(u, "channel_deleted", user, channel_id=channel_id)
+
+    return jsonify({"status": "deleted"})
+
+@app.route("/channels/<channel_id>/chat", methods=["POST"])
+def channel_chat(channel_id):
+    data    = request.json
+    message = data.get("message")
+    user    = data.get("user")
+    preset  = data.get("personality", "normal")
+
+    channels = load_channels()
+    ch = channels.get(channel_id)
+    if not ch:
+        return jsonify({"error": "Canal no existe"}), 404
+
+    user_presence[user] = {"last_seen": time.time(), "status": "online"}
+
+    personality_text = get_personality_text(user, preset)
+    msgs = [
+        {"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH},
+        {"role": "system", "content": (
+            f"Estás en el canal '#{ch['name']}'. "
+            f"Es un canal compartido donde varios usuarios pueden participar. "
+            f"Respondé al mensaje de '{user}' con contexto del historial del canal."
+        )}
+    ]
+
+    for h in ch["messages"][-12:]:
+        msgs.append({"role": "user",      "content": f"[{h['actor']}]: {h['message']}"})
+        msgs.append({"role": "assistant", "content": h["reply"]})
+
+    msgs.append({"role": "user", "content": f"[{user}]: {message}"})
+
+    resp  = client.chat.completions.create(model="gpt-5.4", messages=msgs)
+    reply = resp.choices[0].message.content
+
+    entry = {"actor": user, "message": message, "reply": reply, "ts": time.time()}
+    ch["messages"].append(entry)
+    save_channels(channels)
+
+    # Notificar a todos que hay mensaje nuevo en este canal
+    for u in user_presence:
+        push_event(u, "channel_message", user,
+                   channel_id=channel_id, message=message, reply=reply)
 
     return jsonify({"reply": reply})
 
 
-# ── Endpoint: chat de sala efímera ─────────────────────────────────────
-@app.route("/room-chat", methods=["POST"])
-def room_chat():
-    data    = request.json
-    message = data.get("message")
-    user    = data.get("user")
-    room_id = data.get("room_id")
-    preset  = data.get("personality", "normal")
-
-    if room_id not in rooms:
-        return jsonify({"error": "sala no existe"}), 404
-
-    room             = rooms[room_id]
-    personality_text = get_personality_text(user, preset)
-
-    messages = [
-        {"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH},
-        {"role": "system", "content": (
-            f"Estás en la sala compartida '{room['name']}'. "
-            f"Participantes actuales: {', '.join(room['participants'])}. "
-            f"Esta sesión es efímera: no se guarda permanentemente. "
-            f"Respondé a quien escribe manteniendo contexto de la sesión."
-        )}
-    ]
-
-    for h in room["messages"][-10:]:
-        messages.append({"role": "user",      "content": f"[{h['actor']}]: {h['message']}"})
-        messages.append({"role": "assistant", "content": h["reply"]})
-
-    messages.append({"role": "user", "content": f"[{user}]: {message}"})
-
-    response = client.chat.completions.create(model="gpt-5.4", messages=messages)
-    reply = response.choices[0].message.content
-
-    # Guardar en sala (memoria, no disco)
-    room["messages"].append({
-        "actor": user, "message": message, "reply": reply, "ts": time.time()
-    })
-
-    # Broadcast a todos en la sala
-    broadcast_to_room(room_id, "room_message", user,
-                      message=message, reply=reply, room_name=room["name"])
-
-    return jsonify({"reply": reply, "room_id": room_id})
-
-
-# ── Endpoints: gestión de salas ─────────────────────────────────────────
-@app.route("/rooms", methods=["GET"])
-def list_rooms():
-    result = []
-    for rid, room in rooms.items():
-        result.append({
-            "id":           rid,
-            "name":         room["name"],
-            "creator":      room["creator"],
-            "participants": list(room["participants"]),
-            "msg_count":    len(room["messages"]),
-            "created_at":   room["created_at"],
-        })
-    return jsonify(result)
-
-@app.route("/rooms", methods=["POST"])
-def create_room():
-    data    = request.json
-    user    = data.get("user")
-    name    = data.get("name", f"Sala de {user}").strip()
-    room_id = str(uuid.uuid4())[:8]
-
-    rooms[room_id] = {
-        "name":        name,
-        "creator":     user,
-        "participants": {user},
-        "messages":    [],
-        "created_at":  time.time(),
-    }
-
-    # Broadcast a todos los usuarios online que hay una sala nueva
-    for u in user_presence:
-        push_event(u, "room_created", user, room_id=room_id, room_name=name)
-
-    return jsonify({"room_id": room_id, "name": name})
-
-@app.route("/rooms/<room_id>/join", methods=["POST"])
-def join_room(room_id):
-    data = request.json
-    user = data.get("user")
-
-    if room_id not in rooms:
-        return jsonify({"error": "sala no existe"}), 404
-
-    rooms[room_id]["participants"].add(user)
-    broadcast_to_room(room_id, "room_join", user, room_name=rooms[room_id]["name"])
-
-    return jsonify({
-        "status":   "joined",
-        "name":     rooms[room_id]["name"],
-        "history":  rooms[room_id]["messages"],
-        "participants": list(rooms[room_id]["participants"]),
-    })
-
-@app.route("/rooms/<room_id>/leave", methods=["POST"])
-def leave_room(room_id):
-    data = request.json
-    user = data.get("user")
-
-    if room_id not in rooms:
-        return jsonify({"status": "ok"})
-
-    rooms[room_id]["participants"].discard(user)
-    broadcast_to_room(room_id, "room_leave", user, room_name=rooms[room_id]["name"])
-
-    # Si la sala queda vacía, destruirla
-    if not rooms[room_id]["participants"]:
-        del rooms[room_id]
-        # Notificar a todos que la sala desapareció
-        for u in user_presence:
-            push_event(u, "room_deleted", user, room_id=room_id)
-
-    return jsonify({"status": "left"})
-
-@app.route("/rooms/<room_id>", methods=["GET"])
-def get_room(room_id):
-    if room_id not in rooms:
-        return jsonify({"error": "sala no existe"}), 404
-    room = rooms[room_id]
-    return jsonify({
-        "id":           room_id,
-        "name":         room["name"],
-        "participants": list(room["participants"]),
-        "messages":     room["messages"],
-    })
-
-
-# ── Endpoint: polling de eventos ───────────────────────────────────────
+# ── Polling de eventos ────────────────────────────────────────────────────
 @app.route("/events/<user>")
 def get_events(user):
-    since = float(request.args.get("since", 0))
+    since  = float(request.args.get("since", 0))
     events = load_events()
-    user_events = [e for e in events.get(user, []) if e["ts"] > since]
-    return jsonify(user_events)
+    return jsonify([e for e in events.get(user, []) if e["ts"] > since])
 
 
-# ── Endpoint: personalidad ──────────────────────────────────────────────
+# ── Personalidad ──────────────────────────────────────────────────────────
 @app.route("/personality/<user>", methods=["GET"])
-def get_user_personality(user):
-    personalities = load_personalities()
-    entry = personalities.get(user, {})
+def get_personality(user):
+    entry = load_personalities().get(user, {})
     return jsonify({"custom": entry.get("custom", ""), "presets": PRESET_PERSONALITIES})
 
 @app.route("/personality/<user>", methods=["POST"])
-def set_user_personality(user):
+def set_personality(user):
     data = request.json
-    personalities = load_personalities()
-    if user not in personalities:
-        personalities[user] = {}
-    personalities[user]["custom"] = data.get("custom", "").strip()
-    save_personalities(personalities)
+    p = load_personalities()
+    if user not in p: p[user] = {}
+    p[user]["custom"] = data.get("custom", "").strip()
+    save_personalities(p)
     return jsonify({"status": "ok"})
 
 @app.route("/personality/<user>", methods=["DELETE"])
-def clear_user_personality(user):
-    personalities = load_personalities()
-    if user in personalities:
-        personalities[user]["custom"] = ""
-    save_personalities(personalities)
+def clear_personality(user):
+    p = load_personalities()
+    if user in p: p[user]["custom"] = ""
+    save_personalities(p)
     return jsonify({"status": "cleared"})
 
 
-# ── Endpoint: upload ────────────────────────────────────────────────────
+# ── Upload ────────────────────────────────────────────────────────────────
 @app.route("/upload", methods=["POST"])
 def upload():
     file = request.files["file"]
     user = request.form.get("user", "default")
-
     os.makedirs("uploads", exist_ok=True)
     path = os.path.join("uploads", file.filename)
     file.save(path)
 
-    last_uploaded_text[user]               = ""
-    last_uploaded_image[user]              = None
+    last_uploaded_text[user] = ""
+    last_uploaded_image[user] = None
     last_uploaded_text[user + "_filename"] = file.filename
-    filename = file.filename.lower()
+    fn = file.filename.lower()
 
-    if filename.endswith((".txt", ".csv")):
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    if fn.endswith((".txt", ".csv")):
+        with open(path, encoding="utf-8", errors="ignore") as f:
             last_uploaded_text[user] = f.read()
-    elif filename.endswith((".xlsx", ".xls")):
+    elif fn.endswith((".xlsx", ".xls")):
         wb = openpyxl.load_workbook(path, data_only=True)
-        sheets_text = []
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            rows = []
-            for row in ws.iter_rows(values_only=True):
-                if any(cell is not None for cell in row):
-                    rows.append("\t".join(str(c) if c is not None else "" for c in row))
-            if rows:
-                sheets_text.append(f"[Hoja: {sheet_name}]\n" + "\n".join(rows))
-        last_uploaded_text[user] = "\n\n".join(sheets_text)
-    elif filename.endswith((".jpg", ".jpeg", ".png")):
+        sheets = []
+        for sn in wb.sheetnames:
+            ws  = wb[sn]
+            rows = ["\t".join(str(c) if c is not None else "" for c in r)
+                    for r in ws.iter_rows(values_only=True) if any(c is not None for c in r)]
+            if rows: sheets.append(f"[{sn}]\n" + "\n".join(rows))
+        last_uploaded_text[user] = "\n\n".join(sheets)
+    elif fn.endswith((".jpg", ".jpeg", ".png")):
         last_uploaded_image[user] = path
     else:
-        return jsonify({"error": "Tipo de archivo no soportado"}), 400
+        return jsonify({"error": "Tipo no soportado"}), 400
 
     return jsonify({"status": "uploaded", "filename": file.filename})
 
 
-# ── Endpoint: historial permanente ─────────────────────────────────────
+# ── Historial personal ────────────────────────────────────────────────────
 @app.route("/history/<user>")
-def get_user_history(user):
+def get_history(user):
     return jsonify(load_history().get(user, []))
 
 @app.route("/delete/<user>", methods=["DELETE"])
-def delete_user(user):
-    history = load_history()
-    if user in history:
-        del history[user]
-    save_history(history)
+def delete_history(user):
+    h = load_history()
+    h.pop(user, None)
+    save_history(h)
     return jsonify({"status": "deleted"})
 
 
-# ── Endpoint: presencia ─────────────────────────────────────────────────
+# ── Presencia ─────────────────────────────────────────────────────────────
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
-    data   = request.json
-    user   = data.get("user")
-    active = data.get("active", True)
-    if not user:
-        return jsonify({"error": "missing user"}), 400
-    user_presence[user] = {"last_seen": time.time(), "status": "online" if active else "away"}
+    data = request.json
+    user = data.get("user")
+    if not user: return jsonify({"error": "missing user"}), 400
+    user_presence[user] = {"last_seen": time.time(), "status": "online" if data.get("active", True) else "away"}
     return jsonify({"status": "ok"})
 
 @app.route("/offline", methods=["POST"])
@@ -443,38 +366,18 @@ def set_offline():
     user = data.get("user")
     if user:
         user_presence[user] = {"last_seen": time.time(), "status": "offline"}
-        # Salir de todas las salas donde estaba
-        for room_id in list(rooms.keys()):
-            if user in rooms[room_id]["participants"]:
-                rooms[room_id]["participants"].discard(user)
-                broadcast_to_room(room_id, "room_leave", user, room_name=rooms[room_id]["name"])
-                if not rooms[room_id]["participants"]:
-                    del rooms[room_id]
     return jsonify({"status": "ok"})
 
 @app.route("/users")
 def users():
-    result = []
-    for user, entry in user_presence.items():
-        if not user:
-            continue
-        result.append({"name": user, "status": get_status(entry)})
-    return jsonify(result)
+    return jsonify([
+        {"name": u, "status": get_status(e)}
+        for u, e in user_presence.items() if u
+    ])
 
-
-# ── Endpoint: historial de sala (mirror pasivo) ─────────────────────────
-@app.route("/history-mirror/<user>")
-def get_user_history_mirror(user):
-    """Para el panel espejo pasivo: devuelve historial permanente."""
-    return jsonify(load_history().get(user, []))
-
-
-# ── Home ────────────────────────────────────────────────────────────────
 @app.route("/")
 def home():
     return "AI Backend Running"
 
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
