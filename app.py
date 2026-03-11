@@ -99,11 +99,18 @@ Columna1 | Columna2 | Columna3
 Valor1   | Valor2   | Valor3
 </table>
 
-Widget informativo:
+Widget informativo (dato clave, resumen, alerta):
 <widget title="Título">Contenido del widget</widget>
 
-Archivo descargable:
-<download filename="archivo.txt">Contenido del archivo</download>
+Archivo descargable — REGLAS IMPORTANTES:
+- Usá SOLO extensiones de texto plano: .txt, .csv, .md, .json, .html
+- NUNCA uses .docx, .xlsx o .pptx — esos formatos son binarios y no se pueden generar como texto
+- Para tablas exportables, usá .csv
+- Para documentos formateados, usá .md o .html
+- Para datos estructurados, usá .json
+
+<download filename="archivo.csv">col1,col2,col3
+valor1,valor2,valor3</download>
 
 Usá estas etiquetas solo cuando aporten valor concreto.
 """
