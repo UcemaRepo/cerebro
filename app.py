@@ -266,6 +266,9 @@ def heartbeat():
     user = data.get("user")
     active = data.get("active", True)
 
+    if not user:
+        return jsonify({"error": "missing user"}), 400
+
     user_presence[user] = {
         "last_seen": time.time(),
         "status": "online" if active else "away"
@@ -285,6 +288,8 @@ def set_offline():
 def users():
     result = []
     for user, entry in user_presence.items():
+        if not user:   # ignorar entradas fantasma
+            continue
         result.append({"name": user, "status": get_status(entry)})
     return jsonify(result)
 
@@ -298,12 +303,3 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-
-
-
-
-
-
-
-
