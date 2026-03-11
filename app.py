@@ -4,6 +4,7 @@ import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
+import openpyxl
 
 app = Flask(__name__)
 CORS(app)
@@ -113,7 +114,7 @@ def chat():
         messages.append({"role":"user","content":message})
 
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-5",
         messages=messages
     )
 
@@ -177,6 +178,22 @@ def upload():
 
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             last_uploaded_text = f.read()
+
+    elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+
+        wb = openpyxl.load_workbook(path, data_only=True)
+        sheets_text = []
+
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                if any(cell is not None for cell in row):
+                    rows.append("\t".join(str(c) if c is not None else "" for c in row))
+            if rows:
+                sheets_text.append(f"[Hoja: {sheet_name}]\n" + "\n".join(rows))
+
+        last_uploaded_text = "\n\n".join(sheets_text)
 
     elif filename.endswith(".jpg") or filename.endswith(".jpeg") or filename.endswith(".png"):
 
@@ -250,10 +267,6 @@ def home():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-
-
-
 
 
 
