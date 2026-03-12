@@ -2,10 +2,20 @@ import os
 import json
 import time
 import uuid
-from flask import Flask, request, jsonify
+import re
+from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS
 from openai import OpenAI
 import openpyxl
+
+# Google Sheets (opcional — solo si las credenciales están configuradas)
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import Flow
+    from googleapiclient.discovery import build as gapi_build
+    GOOGLE_AVAILABLE = True
+except ImportError:
+    GOOGLE_AVAILABLE = False
 
 app = Flask(__name__)
 CORS(app)
@@ -22,6 +32,15 @@ user_presence       = {}
 last_uploaded_text  = {}
 last_uploaded_image = {}
 AWAY_THRESHOLD      = 300
+
+SHEETS_FILE         = "sheets.json"   # { username: { sheet_id, sheet_name, token } }
+GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_SCOPES        = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+FRONTEND_URL         = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 
 # ── Persistencia genérica ───────────────────────────────────────────────
@@ -43,6 +62,8 @@ def load_dms():        return load_json(DMS_FILE, {})
 def save_dms(d):       save_json(DMS_FILE, d)
 def load_personalities(): return load_json(PERSONALITIES_FILE, {})
 def save_personalities(d): save_json(PERSONALITIES_FILE, d)
+def load_sheets():   return load_json(SHEETS_FILE, {})
+def save_sheets(d):  save_json(SHEETS_FILE, d)
 
 
 # ── Eventos ──────────────────────────────────────────────────────────────
@@ -157,8 +178,87 @@ def chat():
     else:
         msgs.append({"role": "user", "content": message})
 
-    resp  = client.chat.completions.create(model="gpt-5.4", messages=msgs)
-    reply = resp.choices[0].message.content
+    # Inyectar contexto de la hoja si el usuario tiene una conectada
+    sheet_data = read_sheet(user)
+    if sheet_data:
+        msgs.append({"role": "system", "content":
+            f"El usuario tiene esta hoja de cálculo de Google Sheets conectada:\n{sheet_data}\n\n"
+            "Si el usuario pide modificar la hoja, usá la herramienta 'edit_sheet'. "
+            "Para escribir en un rango usá range_a1 (ej: 'Sheet1!A2:C2') y values (lista de listas). "
+            "Para agregar una fila al final usá append=true."
+        })
+
+    # Herramientas de Sheets (solo si hay hoja conectada)
+    tools = []
+    if sheet_data:
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "edit_sheet",
+                "description": "Modifica la hoja de Google Sheets conectada del usuario. Usá esto cuando el usuario pida escribir, actualizar, agregar o borrar datos en su hoja.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["write", "append"],
+                            "description": "write: sobreescribe un rango. append: agrega fila al final."
+                        },
+                        "range_a1": {
+                            "type": "string",
+                            "description": "Rango A1 para 'write', ej: 'Sheet1!A2:D2'. No requerido para append."
+                        },
+                        "values": {
+                            "type": "array",
+                            "items": {"type": "array", "items": {"type": "string"}},
+                            "description": "Lista de filas, cada fila es lista de celdas. Ej: [['Nico', '100', 'Pendiente']]"
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Descripción breve de qué cambio estás haciendo, para mostrarle al usuario."
+                        }
+                    },
+                    "required": ["action", "values", "summary"]
+                }
+            }
+        }]
+
+    kwargs = {"model": "gpt-5.4", "messages": msgs}
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+
+    resp = client.chat.completions.create(**kwargs)
+    msg_obj = resp.choices[0].message
+
+    # Procesar tool call si el bot quiso editar la hoja
+    tool_result_text = ""
+    if hasattr(msg_obj, "tool_calls") and msg_obj.tool_calls:
+        for tc in msg_obj.tool_calls:
+            if tc.function.name == "edit_sheet":
+                args = json.loads(tc.function.arguments)
+                action  = args.get("action", "write")
+                values  = args.get("values", [])
+                summary = args.get("summary", "")
+
+                if action == "append":
+                    ok, result_msg = append_to_sheet(user, values)
+                else:
+                    range_a1 = args.get("range_a1", "Sheet1!A1")
+                    ok, result_msg = write_to_sheet(user, range_a1, values)
+
+                tool_result_text = result_msg
+
+        # Segunda llamada con resultado del tool para que el bot responda
+        msgs.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in msg_obj.tool_calls
+        ]})
+        msgs.append({"role": "tool", "tool_call_id": msg_obj.tool_calls[0].id, "content": tool_result_text})
+        resp2 = client.chat.completions.create(model="gpt-5.4", messages=msgs)
+        reply = resp2.choices[0].message.content
+    else:
+        reply = msg_obj.content
 
     entry = {"message": message, "reply": reply, "actor": user}
     if uploaded_text:
@@ -419,6 +519,256 @@ def send_dm(other_user):
     push_event(other_user, "dm", sender, message=message, files=files, conv_key=key)
 
     return jsonify({"status": "sent", "entry": entry})
+
+
+# ══════════════════════════════════════════════════════════════════════
+# GOOGLE SHEETS INTEGRATION
+# ══════════════════════════════════════════════════════════════════════
+
+def get_sheets_service(user):
+    """Devuelve un cliente autenticado de Sheets para el usuario, o None."""
+    if not GOOGLE_AVAILABLE:
+        return None
+    sheets = load_sheets()
+    token_data = sheets.get(user, {}).get("token")
+    if not token_data:
+        return None
+    creds = Credentials(
+        token=token_data.get("access_token"),
+        refresh_token=token_data.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        scopes=GOOGLE_SCOPES,
+    )
+    return gapi_build("sheets", "v4", credentials=creds)
+
+def read_sheet(user):
+    """Lee las primeras 50 filas de la hoja conectada. Devuelve string o None."""
+    sheets_cfg = load_sheets()
+    cfg = sheets_cfg.get(user)
+    if not cfg:
+        return None
+    svc = get_sheets_service(user)
+    if not svc:
+        return None
+    try:
+        result = svc.spreadsheets().values().get(
+            spreadsheetId=cfg["sheet_id"],
+            range=f"{cfg.get('tab', 'Sheet1')}!A1:Z50"
+        ).execute()
+        rows = result.get("values", [])
+        lines = [" | ".join(row) for row in rows]
+        return f"[Hoja: {cfg['sheet_name']}]\n" + "\n".join(lines)
+    except Exception as e:
+        return f"[Error leyendo hoja: {e}]"
+
+def write_to_sheet(user, range_a1, values):
+    """Escribe values (lista de listas) en el rango dado. Devuelve (ok, msg)."""
+    sheets_cfg = load_sheets()
+    cfg = sheets_cfg.get(user)
+    if not cfg:
+        return False, "No hay hoja conectada para este usuario."
+    svc = get_sheets_service(user)
+    if not svc:
+        return False, "No se pudo autenticar con Google."
+    try:
+        svc.spreadsheets().values().update(
+            spreadsheetId=cfg["sheet_id"],
+            range=range_a1,
+            valueInputOption="USER_ENTERED",
+            body={"values": values}
+        ).execute()
+        return True, f"Actualicé el rango {range_a1} en {cfg['sheet_name']}."
+    except Exception as e:
+        return False, f"Error al escribir: {e}"
+
+def append_to_sheet(user, values):
+    """Agrega una fila al final de la hoja."""
+    sheets_cfg = load_sheets()
+    cfg = sheets_cfg.get(user)
+    if not cfg:
+        return False, "No hay hoja conectada."
+    svc = get_sheets_service(user)
+    if not svc:
+        return False, "No se pudo autenticar con Google."
+    try:
+        tab = cfg.get("tab", "Sheet1")
+        svc.spreadsheets().values().append(
+            spreadsheetId=cfg["sheet_id"],
+            range=f"{tab}!A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": values}
+        ).execute()
+        return True, f"Agregué una fila en {cfg['sheet_name']}."
+    except Exception as e:
+        return False, f"Error al agregar fila: {e}"
+
+
+# ── OAuth endpoints ────────────────────────────────────────────────────────
+
+@app.route("/sheets/connect", methods=["GET"])
+def sheets_connect():
+    """Inicia el flujo OAuth. El frontend redirige a este endpoint."""
+    user = request.args.get("user")
+    if not user or not GOOGLE_AVAILABLE or not GOOGLE_CLIENT_ID:
+        return jsonify({"error": "Google no configurado. Agregá GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET en Render."}), 400
+
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [request.host_url + "sheets/callback"],
+            }
+        },
+        scopes=GOOGLE_SCOPES,
+        redirect_uri=request.host_url + "sheets/callback",
+    )
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        state=user,   # usamos state para pasar el username
+        prompt="consent",
+    )
+    return redirect(auth_url)
+
+
+@app.route("/sheets/callback", methods=["GET"])
+def sheets_callback():
+    """Google redirige aquí después del login."""
+    user  = request.args.get("state")
+    code  = request.args.get("code")
+    error = request.args.get("error")
+
+    if error or not code:
+        return f"<script>window.opener.postMessage({{type:'sheets_error',error:'{error}'}}, '*');window.close();</script>"
+
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [request.host_url + "sheets/callback"],
+            }
+        },
+        scopes=GOOGLE_SCOPES,
+        redirect_uri=request.host_url + "sheets/callback",
+    )
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+
+    token_data = {
+        "access_token":  creds.token,
+        "refresh_token": creds.refresh_token,
+    }
+
+    sheets_cfg = load_sheets()
+    if user not in sheets_cfg:
+        sheets_cfg[user] = {}
+    sheets_cfg[user]["token"] = token_data
+    save_sheets(sheets_cfg)
+
+    return """<script>
+      window.opener.postMessage({type:'sheets_authed'}, '*');
+      window.close();
+    </script>"""
+
+
+@app.route("/sheets/connect-sheet", methods=["POST"])
+def sheets_connect_sheet():
+    """Después del OAuth, el usuario pega la URL o ID de su hoja."""
+    data     = request.json
+    user     = data.get("user")
+    sheet_input = data.get("sheet_url_or_id", "").strip()
+
+    # Extraer sheet_id de URL o usar directo
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_input)
+    sheet_id = m.group(1) if m else sheet_input
+
+    sheets_cfg = load_sheets()
+    if user not in sheets_cfg or "token" not in sheets_cfg.get(user, {}):
+        return jsonify({"error": "Primero autenticá con Google"}), 401
+
+    # Leer nombre real de la hoja
+    try:
+        svc = get_sheets_service(user)
+        meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        sheet_name = meta["properties"]["title"]
+        tabs = [s["properties"]["title"] for s in meta.get("sheets", [])]
+        first_tab = tabs[0] if tabs else "Sheet1"
+    except Exception as e:
+        return jsonify({"error": f"No se pudo acceder a la hoja: {e}"}), 400
+
+    sheets_cfg[user]["sheet_id"]   = sheet_id
+    sheets_cfg[user]["sheet_name"] = sheet_name
+    sheets_cfg[user]["tab"]        = first_tab
+    save_sheets(sheets_cfg)
+
+    return jsonify({"sheet_name": sheet_name, "tab": first_tab, "tabs": tabs})
+
+
+@app.route("/sheets/disconnect", methods=["POST"])
+def sheets_disconnect():
+    data = request.json
+    user = data.get("user")
+    sheets_cfg = load_sheets()
+    if user in sheets_cfg:
+        del sheets_cfg[user]
+        save_sheets(sheets_cfg)
+    return jsonify({"status": "disconnected"})
+
+
+@app.route("/sheets/status", methods=["GET"])
+def sheets_status():
+    user = request.args.get("user")
+    sheets_cfg = load_sheets()
+    cfg = sheets_cfg.get(user, {})
+    if cfg.get("sheet_id"):
+        return jsonify({
+            "connected": True,
+            "sheet_name": cfg.get("sheet_name"),
+            "tab": cfg.get("tab"),
+            "sheet_id": cfg.get("sheet_id"),
+        })
+    return jsonify({"connected": False})
+
+
+@app.route("/sheets/read", methods=["GET"])
+def sheets_read():
+    user = request.args.get("user")
+    data = read_sheet(user)
+    if data is None:
+        return jsonify({"error": "No hay hoja conectada"}), 404
+    return jsonify({"data": data})
+
+
+@app.route("/sheets/write", methods=["POST"])
+def sheets_write():
+    data   = request.json
+    user   = data.get("user")
+    range_ = data.get("range")
+    values = data.get("values")   # [[row1col1, row1col2], [row2col1, ...]]
+    ok, msg = write_to_sheet(user, range_, values)
+    if ok:
+        return jsonify({"status": "ok", "message": msg})
+    return jsonify({"error": msg}), 400
+
+
+@app.route("/sheets/append", methods=["POST"])
+def sheets_append():
+    data   = request.json
+    user   = data.get("user")
+    values = data.get("values")
+    ok, msg = append_to_sheet(user, values)
+    if ok:
+        return jsonify({"status": "ok", "message": msg})
+    return jsonify({"error": msg}), 400
 
 
 @app.route("/")
