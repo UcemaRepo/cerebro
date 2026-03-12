@@ -41,6 +41,7 @@ GOOGLE_SCOPES        = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 FRONTEND_URL         = os.getenv("FRONTEND_URL", "http://localhost:3000")
+REDIRECT_URI         = os.getenv("REDIRECT_URI", "https://backendia-khz7.onrender.com/sheets/callback")
 
 
 # ── Persistencia genérica ───────────────────────────────────────────────
@@ -622,11 +623,11 @@ def sheets_connect():
                 "client_secret": GOOGLE_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [request.host_url + "sheets/callback"],
+                "redirect_uris": [REDIRECT_URI],
             }
         },
         scopes=GOOGLE_SCOPES,
-        redirect_uri=request.host_url + "sheets/callback",
+        redirect_uri=REDIRECT_URI,
     )
     auth_url, state = flow.authorization_url(
         access_type="offline",
@@ -654,11 +655,11 @@ def sheets_callback():
                 "client_secret": GOOGLE_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [request.host_url + "sheets/callback"],
+                "redirect_uris": [REDIRECT_URI],
             }
         },
         scopes=GOOGLE_SCOPES,
-        redirect_uri=request.host_url + "sheets/callback",
+        redirect_uri=REDIRECT_URI,
     )
     flow.fetch_token(code=code)
     creds = flow.credentials
