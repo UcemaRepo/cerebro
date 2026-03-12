@@ -112,6 +112,8 @@ REGLAS GENERALES:
 - Si la carrera se cursa en el primer semestre: formato 2026SEM1 (año+semestre, sin espacios).
 - Poner fecha de beca solo si tiene beca. Siempre poner fecha de admisión.
 - En la columna de responsable de pago: colocar el MAIL del responsable, no el nombre.
+- Columna Q (mail): colocar el mail del alumno.
+- Columna R (celular): colocar el celular del alumno.
 - Descuento de matrícula: siempre 0% salvo que el usuario indique lo contrario.
 
 SIGLAS DE CARRERAS:
@@ -141,12 +143,12 @@ PASO 1 — ENTENDER EL DOCUMENTO:
 Leé el documento adjunto. Hacé un resumen breve de los datos del alumno que encontraste: nombre, carrera, beca, fecha de admisión, mail del responsable. Preguntá si falta algo antes de continuar. Esperá confirmación del usuario.
 
 PASO 2 — COMPLETAR HOJA BASE:
-Con los datos confirmados, completá la primera hoja vinculada (base de admisiones). Indicá exactamente qué valores vas a escribir en qué campos. Esperá confirmación antes de escribir.
+Con los datos confirmados, completá la primera hoja vinculada (base de admisiones). Indicá exactamente qué valores vas a escribir en qué campos. Esperá confirmación antes de escribir. Una vez que escribiste, avisá explícitamente: "✅ Hoja base completada." y esperá que el usuario te diga que continúe.
 
 PASO 3 — COMPLETAR HOJA DE FACTURACIÓN:
-Tomá los datos necesarios del paso anterior y completá la hoja de facturación. Calculá cápita, arancel y demás campos según las reglas. Indicá los valores antes de escribir. Esperá confirmación.
+Solo empezá este paso cuando el usuario te diga que continúe después del paso 2. Tomá los datos necesarios del paso anterior y completá la hoja de facturación. Calculá cápita, arancel y demás campos según las reglas. Indicá los valores antes de escribir. Esperá confirmación antes de escribir. Una vez que escribiste, avisá: "✅ Hoja de facturación completada. Carga finalizada."
 
-IMPORTANTE: Nunca saltes pasos. Siempre esperá un "ok", "sí" o confirmación del usuario antes de pasar al siguiente paso o escribir en una hoja.""",
+IMPORTANTE: Nunca saltes pasos. Nunca completés la hoja de facturación en el mismo turno que la hoja base. Siempre esperá un "ok", "sí", "listo" o "continuar" del usuario antes de pasar al siguiente paso o escribir en cualquier hoja.""",
 }
 
 def get_personality_text(user, preset_key):
