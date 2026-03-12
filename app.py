@@ -637,9 +637,13 @@ def sheets_connect():
         state=user,
         prompt="consent",
     )
-    print("AUTH URL GENERADA:", auth_url)
-    print("REDIRECT_URI USADA:", REDIRECT_URI)
-    print("CLIENT_ID:", GOOGLE_CLIENT_ID[:20] + "...")
+    import sys
+    print("=== SHEETS DEBUG ===", flush=True)
+    print("AUTH URL:", auth_url, flush=True)
+    print("REDIRECT_URI:", REDIRECT_URI, flush=True)
+    print("CLIENT_ID empieza con:", GOOGLE_CLIENT_ID[:30], flush=True)
+    print("GOOGLE_AVAILABLE:", GOOGLE_AVAILABLE, flush=True)
+    sys.stdout.flush()
     return redirect(auth_url)
 
 
