@@ -8,10 +8,9 @@ from flask_cors import CORS
 from openai import OpenAI
 import openpyxl
 
-# Google Sheets (opcional — solo si las credenciales están configuradas)
+# Google Sheets via Service Account
 try:
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import Flow
+    from google.oauth2 import service_account
     from googleapiclient.discovery import build as gapi_build
     GOOGLE_AVAILABLE = True
 except ImportError:
@@ -35,15 +34,12 @@ last_uploaded_text  = {}
 last_uploaded_image = {}
 AWAY_THRESHOLD      = 300
 
-SHEETS_FILE         = "sheets.json"   # { username: { sheet_id, sheet_name, token } }
-GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_SCOPES        = [
+SHEETS_FILE   = "sheets.json"   # { username: { sheet_id, sheet_name } }
+GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
-FRONTEND_URL         = os.getenv("FRONTEND_URL", "http://localhost:3000")
-REDIRECT_URI         = os.getenv("REDIRECT_URI", "https://backendia-khz7.onrender.com/sheets/callback")
+GOOGLE_SA_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT", "")  # JSON completo de la SA
 
 
 # ── Persistencia genérica ───────────────────────────────────────────────
@@ -528,55 +524,19 @@ def send_dm(other_user):
 # GOOGLE SHEETS INTEGRATION
 # ══════════════════════════════════════════════════════════════════════
 
-def get_sheets_service(user):
-    """Devuelve un cliente autenticado de Sheets para el usuario, o None."""
-    if not GOOGLE_AVAILABLE:
+def get_sheets_service(user=None):
+    """Devuelve cliente de Sheets autenticado via Service Account."""
+    if not GOOGLE_AVAILABLE or not GOOGLE_SA_JSON:
         return None
-    sheets = load_sheets()
-    token_data = sheets.get(user, {}).get("token")
-    if not token_data:
+    try:
+        sa_info = json.loads(GOOGLE_SA_JSON)
+        creds   = service_account.Credentials.from_service_account_info(
+            sa_info, scopes=GOOGLE_SCOPES
+        )
+        return gapi_build("sheets", "v4", credentials=creds)
+    except Exception as e:
+        print("Error creando servicio Sheets:", e)
         return None
-
-    access_token = token_data.get("access_token")
-    refresh_token = token_data.get("refresh_token")
-
-    creds = Credentials(
-        token=access_token,
-        refresh_token=refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
-        scopes=GOOGLE_SCOPES,
-    )
-
-    # Refrescar token si expiró
-    if not creds.valid and creds.refresh_token:
-        try:
-            import requests as _req
-            r = _req.post("https://oauth2.googleapis.com/token", data={
-                "client_id":     GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "refresh_token": refresh_token,
-                "grant_type":    "refresh_token",
-            })
-            if r.ok:
-                new_token = r.json().get("access_token")
-                creds = Credentials(
-                    token=new_token,
-                    refresh_token=refresh_token,
-                    token_uri="https://oauth2.googleapis.com/token",
-                    client_id=GOOGLE_CLIENT_ID,
-                    client_secret=GOOGLE_CLIENT_SECRET,
-                    scopes=GOOGLE_SCOPES,
-                )
-                # Guardar token nuevo
-                all_sheets = load_sheets()
-                all_sheets[user]["token"]["access_token"] = new_token
-                save_sheets(all_sheets)
-        except Exception:
-            pass
-
-    return gapi_build("sheets", "v4", credentials=creds)
 
 def read_sheet(user):
     """Lee las primeras 50 filas de la hoja conectada. Devuelve string o None."""
@@ -641,90 +601,7 @@ def append_to_sheet(user, values):
         return False, f"Error al agregar fila: {e}"
 
 
-# ── OAuth endpoints ────────────────────────────────────────────────────────
-
-@app.route("/sheets/connect", methods=["GET"])
-def sheets_connect():
-    """Inicia el flujo OAuth construyendo la URL manualmente (sin PKCE)."""
-    user = request.args.get("user")
-    if not user or not GOOGLE_CLIENT_ID:
-        return jsonify({"error": "Google no configurado."}), 400
-
-    from urllib.parse import quote
-    # Encodear cada parámetro manualmente con %20 en vez de + para el scope
-    scope = "%20".join(quote(s, safe="") for s in GOOGLE_SCOPES)
-    auth_url = (
-        "https://accounts.google.com/o/oauth2/auth"
-        f"?response_type=code"
-        f"&client_id={quote(GOOGLE_CLIENT_ID, safe='')}"
-        f"&redirect_uri={quote(REDIRECT_URI, safe='')}"
-        f"&scope={scope}"
-        f"&state={quote(user, safe='')}"
-        f"&access_type=offline"
-        f"&prompt=consent"
-    )
-    return redirect(auth_url)
-
-
-@app.route("/sheets/callback", methods=["GET"])
-def sheets_callback():
-    """Google redirige aquí después del login."""
-    user  = request.args.get("state")
-    code  = request.args.get("code")
-    error = request.args.get("error")
-
-    if error or not code:
-        return f"<script>window.opener.postMessage({{type:'sheets_error',error:'{error}'}}, '*');window.close();</script>"
-
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        return "<h3>Error: GOOGLE_CLIENT_ID o GOOGLE_CLIENT_SECRET no configurados en Render.</h3>", 500
-
-    try:
-        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-
-        # Reconstruir URL como HTTPS (Render proxy)
-        callback_url = request.url
-        if callback_url.startswith("http://"):
-            callback_url = "https://" + callback_url[7:]
-
-        # Intercambiar code por tokens directamente con requests (sin PKCE)
-        import requests as _req
-        token_resp = _req.post("https://oauth2.googleapis.com/token", data={
-            "code":          code,
-            "client_id":     GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uri":  REDIRECT_URI,
-            "grant_type":    "authorization_code",
-        })
-        if not token_resp.ok:
-            raise Exception(f"Token exchange failed: {token_resp.text}")
-
-        token_json = token_resp.json()
-        token_data = {
-            "access_token":  token_json.get("access_token"),
-            "refresh_token": token_json.get("refresh_token"),
-        }
-
-        sheets_cfg = load_sheets()
-        if user not in sheets_cfg:
-            sheets_cfg[user] = {}
-        sheets_cfg[user]["token"] = token_data
-        save_sheets(sheets_cfg)
-
-        return """<script>
-          window.opener && window.opener.postMessage({type:'sheets_authed'}, '*');
-          window.close();
-        </script><p>Autenticado. Podés cerrar esta ventana.</p>"""
-
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print("SHEETS CALLBACK ERROR:", tb)
-        # Mostrar error detallado para debugging
-        return f"""<h3>Error en callback</h3>
-<pre>{tb}</pre>
-<p>REDIRECT_URI usado: {REDIRECT_URI}</p>
-<p>URL recibida: {request.url}</p>""", 500
+# ── Sheets endpoints (Service Account) ────────────────────────────────────
 
 
 @app.route("/sheets/connect-sheet", methods=["POST"])
@@ -738,9 +615,9 @@ def sheets_connect_sheet():
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_input)
     sheet_id = m.group(1) if m else sheet_input
 
+    if not GOOGLE_SA_JSON:
+        return jsonify({"error": "GOOGLE_SERVICE_ACCOUNT no configurado en Render"}), 400
     sheets_cfg = load_sheets()
-    if user not in sheets_cfg or "token" not in sheets_cfg.get(user, {}):
-        return jsonify({"error": "Primero autenticá con Google"}), 401
 
     # Leer nombre real de la hoja
     try:
