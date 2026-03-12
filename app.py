@@ -297,7 +297,7 @@ def chat():
             }
         }]
 
-    kwargs = {"model": "gpt-5.4", "messages": msgs, "max_tokens": 600 if is_carga else 1500}
+    kwargs = {"model": "gpt-5.4", "messages": msgs, "max_completion_tokens": 600 if is_carga else 1500}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
