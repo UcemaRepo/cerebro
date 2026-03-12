@@ -188,12 +188,14 @@ def create_channel():
     if slug in channels:
         return jsonify({"error": "Ya existe un canal con ese nombre"}), 400
 
+    ai_enabled = data.get("ai_enabled", True)
     channels[slug] = {
-        "id":       slug,
-        "name":     name,
-        "creator":  user,
-        "created":  time.time(),
-        "messages": [],
+        "id":         slug,
+        "name":       name,
+        "creator":    user,
+        "created":    time.time(),
+        "ai_enabled": ai_enabled,
+        "messages":   [],
     }
     save_channels(channels)
 
@@ -245,30 +247,31 @@ def channel_chat(channel_id):
 
     user_presence[user] = {"last_seen": time.time(), "status": "online"}
 
-    personality_text = get_personality_text(user, preset)
-    msgs = [
-        {"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH},
-        {"role": "system", "content": (
-            f"Estás en el canal '#{ch['name']}'. "
-            f"Es un canal compartido donde varios usuarios pueden participar. "
-            f"Respondé al mensaje de '{user}' con contexto del historial del canal."
-        )}
-    ]
+    ai_enabled = ch.get("ai_enabled", True)
 
-    for h in ch["messages"][-12:]:
-        msgs.append({"role": "user",      "content": f"[{h['actor']}]: {h['message']}"})
-        msgs.append({"role": "assistant", "content": h["reply"]})
-
-    msgs.append({"role": "user", "content": f"[{user}]: {message}"})
-
-    resp  = client.chat.completions.create(model="gpt-5.4", messages=msgs)
-    reply = resp.choices[0].message.content
+    if ai_enabled:
+        personality_text = get_personality_text(user, preset)
+        msgs = [
+            {"role": "system", "content": personality_text + "\n\n" + SYSTEM_RICH},
+            {"role": "system", "content": (
+                f"Estás en el canal '#{ch['name']}'. "
+                f"Es un canal compartido donde varios usuarios pueden participar. "
+                f"Respondé al mensaje de '{user}' con contexto del historial del canal."
+            )}
+        ]
+        for h in ch["messages"][-12:]:
+            msgs.append({"role": "user",      "content": f"[{h['actor']}]: {h['message']}"})
+            msgs.append({"role": "assistant", "content": h["reply"]})
+        msgs.append({"role": "user", "content": f"[{user}]: {message}"})
+        resp  = client.chat.completions.create(model="gpt-5.4", messages=msgs)
+        reply = resp.choices[0].message.content
+    else:
+        reply = ""
 
     entry = {"actor": user, "message": message, "reply": reply, "ts": time.time()}
     ch["messages"].append(entry)
     save_channels(channels)
 
-    # Notificar a todos que hay mensaje nuevo en este canal
     for u in user_presence:
         push_event(u, "channel_message", user,
                    channel_id=channel_id, message=message, reply=reply)
