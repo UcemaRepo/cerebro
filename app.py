@@ -650,18 +650,19 @@ def sheets_connect():
     if not user or not GOOGLE_CLIENT_ID:
         return jsonify({"error": "Google no configurado."}), 400
 
-    from urllib.parse import urlencode, quote
-    scope = " ".join(GOOGLE_SCOPES)
-    params = {
-        "response_type": "code",
-        "client_id":     GOOGLE_CLIENT_ID,
-        "redirect_uri":  REDIRECT_URI,
-        "scope":         scope,
-        "state":         user,
-        "access_type":   "offline",
-        "prompt":        "consent",
-    }
-    auth_url = "https://accounts.google.com/o/oauth2/auth?" + urlencode(params)
+    from urllib.parse import quote
+    # Encodear cada parámetro manualmente con %20 en vez de + para el scope
+    scope = "%20".join(quote(s, safe="") for s in GOOGLE_SCOPES)
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/auth"
+        f"?response_type=code"
+        f"&client_id={quote(GOOGLE_CLIENT_ID, safe='')}"
+        f"&redirect_uri={quote(REDIRECT_URI, safe='')}"
+        f"&scope={scope}"
+        f"&state={quote(user, safe='')}"
+        f"&access_type=offline"
+        f"&prompt=consent"
+    )
     return redirect(auth_url)
 
 
