@@ -19,6 +19,8 @@ except ImportError:
 
 app = Flask(__name__)
 CORS(app)
+import os as _os_env
+_os_env.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -661,7 +663,12 @@ def sheets_callback():
         scopes=GOOGLE_SCOPES,
         redirect_uri=REDIRECT_URI,
     )
-    flow.fetch_token(code=code)
+    import os as _os
+    _os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"  # Render maneja HTTPS via proxy
+    flow.fetch_token(
+        authorization_response=request.url.replace("http://", "https://"),
+        code=code
+    )
     creds = flow.credentials
 
     token_data = {
