@@ -16,6 +16,17 @@ try:
 except ImportError:
     GOOGLE_AVAILABLE = False
 
+# PDF
+try:
+    from pypdf import PdfReader
+    PDF_AVAILABLE = True
+except ImportError:
+    try:
+        from PyPDF2 import PdfReader
+        PDF_AVAILABLE = True
+    except ImportError:
+        PDF_AVAILABLE = False
+
 app = Flask(__name__)
 CORS(app)
 import os as _os_env
@@ -161,21 +172,42 @@ def chat():
     if ctx:
         msgs.append({"role": "system", "content": ctx})
 
-    uploaded_text = last_uploaded_text.get(user, "")
-    if uploaded_text:
-        msgs.append({"role": "system", "content": "Documento:\n\n" + uploaded_text})
+    # Archivos enviados directamente como base64 en el payload
+    files = data.get("files", [])
 
+    # También considerar archivos subidos via /upload (legacy)
+    uploaded_text  = last_uploaded_text.get(user, "")
     uploaded_image = last_uploaded_image.get(user)
-    if uploaded_image:
-        import base64
+
+    # Separar archivos por tipo
+    image_files = [f for f in files if f.get("type", "").startswith("image/")]
+    doc_files   = [f for f in files if not f.get("type", "").startswith("image/")]
+
+    # Texto de documentos (PDF, txt, csv, xlsx del payload — ya procesados en /upload)
+    if uploaded_text:
+        msgs.append({"role": "system", "content": "Documento subido:\n\n" + uploaded_text})
+
+    # Construir mensaje del usuario con imágenes si hay
+    all_images = image_files[:]
+    if uploaded_image and not image_files:
+        # imagen legacy del /upload
+        import base64 as _b64
         with open(uploaded_image, "rb") as img:
-            b64 = base64.b64encode(img.read()).decode()
-        msgs.append({"role": "user", "content": [
-            {"type": "text", "text": message},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-        ]})
+            b64 = _b64.b64encode(img.read()).decode()
+        all_images.append({"type": "legacy", "dataURL": f"data:image/jpeg;base64,{b64}"})
+
+    if all_images:
+        content_parts = [{"type": "text", "text": message or " "}]
+        for img in all_images:
+            data_url = img.get("dataURL", "")
+            if data_url:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": data_url}
+                })
+        msgs.append({"role": "user", "content": content_parts})
     else:
-        msgs.append({"role": "user", "content": message})
+        msgs.append({"role": "user", "content": message or " "})
 
     # Inyectar contexto de la hoja si el usuario tiene una conectada
     sheet_data = read_sheet(user)
@@ -436,6 +468,19 @@ def upload():
                     for r in ws.iter_rows(values_only=True) if any(c is not None for c in r)]
             if rows: sheets.append(f"[{sn}]\n" + "\n".join(rows))
         last_uploaded_text[user] = "\n\n".join(sheets)
+    elif fn.endswith(".pdf"):
+        if not PDF_AVAILABLE:
+            return jsonify({"error": "PDF no soportado — instalá pypdf"}), 400
+        try:
+            reader = PdfReader(path)
+            pages  = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                if text.strip():
+                    pages.append(f"[Página {i+1}]\n{text.strip()}")
+            last_uploaded_text[user] = "\n\n".join(pages) if pages else "[PDF sin texto extraíble]"
+        except Exception as e:
+            return jsonify({"error": f"Error leyendo PDF: {e}"}), 400
     elif fn.endswith((".jpg", ".jpeg", ".png")):
         last_uploaded_image[user] = path
     else:
