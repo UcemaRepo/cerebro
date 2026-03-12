@@ -650,42 +650,59 @@ def sheets_callback():
     if error or not code:
         return f"<script>window.opener.postMessage({{type:'sheets_error',error:'{error}'}}, '*');window.close();</script>"
 
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI],
-            }
-        },
-        scopes=GOOGLE_SCOPES,
-        redirect_uri=REDIRECT_URI,
-    )
-    import os as _os
-    _os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"  # Render maneja HTTPS via proxy
-    flow.fetch_token(
-        authorization_response=request.url.replace("http://", "https://"),
-        code=code
-    )
-    creds = flow.credentials
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return "<h3>Error: GOOGLE_CLIENT_ID o GOOGLE_CLIENT_SECRET no configurados en Render.</h3>", 500
 
-    token_data = {
-        "access_token":  creds.token,
-        "refresh_token": creds.refresh_token,
-    }
+    try:
+        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
-    sheets_cfg = load_sheets()
-    if user not in sheets_cfg:
-        sheets_cfg[user] = {}
-    sheets_cfg[user]["token"] = token_data
-    save_sheets(sheets_cfg)
+        # Reconstruir URL como HTTPS (Render proxy)
+        callback_url = request.url
+        if callback_url.startswith("http://"):
+            callback_url = "https://" + callback_url[7:]
 
-    return """<script>
-      window.opener.postMessage({type:'sheets_authed'}, '*');
-      window.close();
-    </script>"""
+        flow = Flow.from_client_config(
+            {
+                "web": {
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [REDIRECT_URI],
+                }
+            },
+            scopes=GOOGLE_SCOPES,
+            redirect_uri=REDIRECT_URI,
+        )
+
+        flow.fetch_token(authorization_response=callback_url)
+        creds = flow.credentials
+
+        token_data = {
+            "access_token":  creds.token,
+            "refresh_token": creds.refresh_token,
+        }
+
+        sheets_cfg = load_sheets()
+        if user not in sheets_cfg:
+            sheets_cfg[user] = {}
+        sheets_cfg[user]["token"] = token_data
+        save_sheets(sheets_cfg)
+
+        return """<script>
+          window.opener && window.opener.postMessage({type:'sheets_authed'}, '*');
+          window.close();
+        </script><p>Autenticado. Podés cerrar esta ventana.</p>"""
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print("SHEETS CALLBACK ERROR:", tb)
+        # Mostrar error detallado para debugging
+        return f"""<h3>Error en callback</h3>
+<pre>{tb}</pre>
+<p>REDIRECT_URI usado: {REDIRECT_URI}</p>
+<p>URL recibida: {request.url}</p>""", 500
 
 
 @app.route("/sheets/connect-sheet", methods=["POST"])
