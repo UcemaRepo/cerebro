@@ -143,7 +143,7 @@ def build_users_context(history, known_users):
         h = history.get(u, [])
         if not h: continue
         lines.append(f"\n--- {u} ---")
-        for m in h[-10:]:
+        for m in h[-3:]:
             lines.append(f"  [{u}]: {m['message']}")
             lines.append(f"  [Bot]: {m['reply']}")
     return "\n".join(lines) if len(lines) > 1 else ""
@@ -164,7 +164,7 @@ def chat():
 
     msgs = [{"role": "system", "content": get_personality_text(user, preset) + "\n\n" + SYSTEM_RICH}]
 
-    for h in history[user][-10:]:
+    for h in history[user][-6:]:
         msgs.append({"role": "user",      "content": h["message"]})
         msgs.append({"role": "assistant", "content": h["reply"]})
 
@@ -177,6 +177,8 @@ def chat():
 
     # Contexto de documentos
     if doc_context:
+        if len(doc_context) > 8000:
+            doc_context = doc_context[:8000] + "\n\n[... documento truncado para ahorrar memoria ...]"
         msgs.append({"role": "system", "content": "El usuario adjuntó estos documentos:\n\n" + doc_context})
 
     # Imágenes
@@ -192,9 +194,15 @@ def chat():
     else:
         msgs.append({"role": "user", "content": message or " "})
 
-    # Inyectar contexto de la hoja si el usuario tiene una conectada
-    sheet_data = read_sheet(user)
+    # Inyectar contexto de la hoja solo si el mensaje es relevante
+    SHEET_KEYWORDS = ("hoja", "sheet", "tabla", "fila", "columna", "celda", "agreg", "actualiz",
+                      "modific", "escrib", "datos", "registro", "base", "excel", "planilla")
+    msg_lower  = (message or "").lower()
+    needs_sheet = any(kw in msg_lower for kw in SHEET_KEYWORDS)
+    sheet_data = read_sheet(user) if needs_sheet else None
     if sheet_data:
+        if len(sheet_data) > 4000:
+            sheet_data = sheet_data[:4000] + "\n[... hoja truncada ...]"
         msgs.append({"role": "system", "content":
             f"El usuario tiene esta hoja de cálculo de Google Sheets conectada:\n{sheet_data}\n\n"
             "Si el usuario pide modificar la hoja, usá la herramienta 'edit_sheet'. "
@@ -655,7 +663,7 @@ def read_sheet(user):
         try:
             result = svc.spreadsheets().values().get(
                 spreadsheetId=sheet["id"],
-                range=f"{sheet.get('tab', 'Sheet1')}!A1:Z50"
+                range=f"{sheet.get('tab', 'Sheet1')}!A1:P30"
             ).execute()
             rows  = result.get("values", [])
             lines = [" | ".join(row) for row in rows]
