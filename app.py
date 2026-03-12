@@ -209,7 +209,7 @@ def chat():
             "type": "function",
             "function": {
                 "name": "edit_sheet",
-                "description": "Modifica la hoja de Google Sheets conectada del usuario. Usá esto cuando el usuario pida escribir, actualizar, agregar o borrar datos en su hoja.",
+                "description": "Modifica una hoja de Google Sheets del usuario. Usá esto cuando el usuario pida escribir, actualizar o agregar datos.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -217,6 +217,10 @@ def chat():
                             "type": "string",
                             "enum": ["write", "append"],
                             "description": "write: sobreescribe un rango. append: agrega fila al final."
+                        },
+                        "sheet_name": {
+                            "type": "string",
+                            "description": "Nombre de la hoja a modificar (tal como aparece en el contexto). Si hay una sola hoja activa, podés omitirlo."
                         },
                         "range_a1": {
                             "type": "string",
@@ -229,7 +233,7 @@ def chat():
                         },
                         "summary": {
                             "type": "string",
-                            "description": "Descripción breve de qué cambio estás haciendo, para mostrarle al usuario."
+                            "description": "Descripción breve de qué cambio estás haciendo."
                         }
                     },
                     "required": ["action", "values", "summary"]
@@ -255,11 +259,12 @@ def chat():
                 values  = args.get("values", [])
                 summary = args.get("summary", "")
 
+                sheet_target = args.get("sheet_name", "")
                 if action == "append":
-                    ok, result_msg = append_to_sheet(user, values)
+                    ok, result_msg = append_to_sheet(user, sheet_target, values)
                 else:
                     range_a1 = args.get("range_a1", "Sheet1!A1")
-                    ok, result_msg = write_to_sheet(user, range_a1, values)
+                    ok, result_msg = write_to_sheet(user, sheet_target, range_a1, values)
 
                 tool_result_text = result_msg
 
@@ -631,92 +636,104 @@ def get_sheets_service(user=None):
         print("Error creando servicio Sheets:", e)
         return None
 
+def get_user_sheets_cfg(user):
+    """Devuelve (library, active_ids) para el usuario."""
+    cfg = load_sheets().get(user, {})
+    return cfg.get("library", []), cfg.get("active", [])
+
 def read_sheet(user):
-    """Lee las primeras 50 filas de la hoja conectada. Devuelve string o None."""
-    sheets_cfg = load_sheets()
-    cfg = sheets_cfg.get(user)
-    if not cfg:
+    """Lee todas las hojas activas. Devuelve string o None."""
+    library, active_ids = get_user_sheets_cfg(user)
+    active = [s for s in library if s["id"] in active_ids]
+    if not active:
         return None
-    svc = get_sheets_service(user)
+    svc = get_sheets_service()
     if not svc:
         return None
-    try:
-        result = svc.spreadsheets().values().get(
-            spreadsheetId=cfg["sheet_id"],
-            range=f"{cfg.get('tab', 'Sheet1')}!A1:Z50"
-        ).execute()
-        rows = result.get("values", [])
-        lines = [" | ".join(row) for row in rows]
-        return f"[Hoja: {cfg['sheet_name']}]\n" + "\n".join(lines)
-    except Exception as e:
-        return f"[Error leyendo hoja: {e}]"
+    parts = []
+    for sheet in active:
+        try:
+            result = svc.spreadsheets().values().get(
+                spreadsheetId=sheet["id"],
+                range=f"{sheet.get('tab', 'Sheet1')}!A1:Z50"
+            ).execute()
+            rows  = result.get("values", [])
+            lines = [" | ".join(row) for row in rows]
+            parts.append(f"[Hoja: {sheet['name']}]\n" + "\n".join(lines))
+        except Exception as e:
+            parts.append(f"[Hoja: {sheet['name']} — error: {e}]")
+    return "\n\n".join(parts) if parts else None
 
-def write_to_sheet(user, range_a1, values):
-    """Escribe values (lista de listas) en el rango dado. Devuelve (ok, msg)."""
-    sheets_cfg = load_sheets()
-    cfg = sheets_cfg.get(user)
-    if not cfg:
-        return False, "No hay hoja conectada para este usuario."
-    svc = get_sheets_service(user)
+def write_to_sheet(user, sheet_name_or_id, range_a1, values):
+    """Escribe en una hoja activa específica."""
+    library, active_ids = get_user_sheets_cfg(user)
+    active = [s for s in library if s["id"] in active_ids]
+    # Buscar por nombre o id
+    target = next((s for s in active if s["name"] == sheet_name_or_id or s["id"] == sheet_name_or_id), None)
+    if not target and active:
+        target = active[0]  # fallback a la primera activa
+    if not target:
+        return False, "No hay hoja activa."
+    svc = get_sheets_service()
     if not svc:
         return False, "No se pudo autenticar con Google."
     try:
         svc.spreadsheets().values().update(
-            spreadsheetId=cfg["sheet_id"],
+            spreadsheetId=target["id"],
             range=range_a1,
             valueInputOption="USER_ENTERED",
             body={"values": values}
         ).execute()
-        return True, f"Actualicé el rango {range_a1} en {cfg['sheet_name']}."
+        return True, f"Actualicé el rango {range_a1} en '{target['name']}'."
     except Exception as e:
         return False, f"Error al escribir: {e}"
 
-def append_to_sheet(user, values):
-    """Agrega una fila al final de la hoja."""
-    sheets_cfg = load_sheets()
-    cfg = sheets_cfg.get(user)
-    if not cfg:
-        return False, "No hay hoja conectada."
-    svc = get_sheets_service(user)
+def append_to_sheet(user, sheet_name_or_id, values):
+    """Agrega una fila al final de una hoja activa."""
+    library, active_ids = get_user_sheets_cfg(user)
+    active = [s for s in library if s["id"] in active_ids]
+    target = next((s for s in active if s["name"] == sheet_name_or_id or s["id"] == sheet_name_or_id), None)
+    if not target and active:
+        target = active[0]
+    if not target:
+        return False, "No hay hoja activa."
+    svc = get_sheets_service()
     if not svc:
         return False, "No se pudo autenticar con Google."
     try:
-        tab = cfg.get("tab", "Sheet1")
+        tab = target.get("tab", "Sheet1")
         svc.spreadsheets().values().append(
-            spreadsheetId=cfg["sheet_id"],
+            spreadsheetId=target["id"],
             range=f"{tab}!A1",
             valueInputOption="USER_ENTERED",
             insertDataOption="INSERT_ROWS",
             body={"values": values}
         ).execute()
-        return True, f"Agregué una fila en {cfg['sheet_name']}."
+        return True, f"Agregué una fila en '{target['name']}'."
     except Exception as e:
         return False, f"Error al agregar fila: {e}"
 
 
-# ── Sheets endpoints (Service Account) ────────────────────────────────────
+# ── Sheets endpoints (Service Account, multi-sheet) ───────────────────────
 
-
-@app.route("/sheets/connect-sheet", methods=["POST"])
-def sheets_connect_sheet():
+@app.route("/sheets/add", methods=["POST"])
+def sheets_add():
+    """Agrega una hoja a la biblioteca del usuario (o la activa si ya existe)."""
     data        = request.json
     user        = data.get("user")
     sheet_input = data.get("sheet_url_or_id", "").strip()
 
     if not sheet_input:
         return jsonify({"error": "URL o ID de hoja vacío"}), 400
-
     if not GOOGLE_SA_JSON:
         return jsonify({"error": "GOOGLE_SERVICE_ACCOUNT no configurado en Render"}), 400
 
-    # Extraer sheet_id de URL o usar directo
-    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_input)
+    m        = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_input)
     sheet_id = m.group(1) if m else sheet_input
-    print(f"Vinculando sheet_id={sheet_id} para user={user}", flush=True)
 
     svc = get_sheets_service()
     if not svc:
-        return jsonify({"error": "No se pudo crear el servicio de Sheets — revisá GOOGLE_SERVICE_ACCOUNT"}), 500
+        return jsonify({"error": "No se pudo crear el servicio de Sheets"}), 500
 
     try:
         meta       = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
@@ -726,44 +743,67 @@ def sheets_connect_sheet():
     except Exception as e:
         import traceback
         print("ERROR accediendo a hoja:", traceback.format_exc(), flush=True)
-        return jsonify({"error": f"No se pudo acceder a la hoja: {str(e)}. ¿Compartiste la hoja con el email de la cuenta de servicio?"}), 400
+        return jsonify({"error": f"No se pudo acceder: {str(e)}. ¿Compartiste la hoja con el email de la cuenta de servicio?"}), 400
 
     sheets_cfg = load_sheets()
     if user not in sheets_cfg:
-        sheets_cfg[user] = {}
-    sheets_cfg[user]["sheet_id"]   = sheet_id
-    sheets_cfg[user]["sheet_name"] = sheet_name
-    sheets_cfg[user]["tab"]        = first_tab
+        sheets_cfg[user] = {"library": [], "active": []}
+
+    library = sheets_cfg[user].get("library", [])
+    active  = sheets_cfg[user].get("active", [])
+
+    # Si ya existe en biblioteca, solo activar
+    existing = next((s for s in library if s["id"] == sheet_id), None)
+    if not existing:
+        library.append({"id": sheet_id, "name": sheet_name, "tab": first_tab})
+    if sheet_id not in active:
+        active.append(sheet_id)
+
+    sheets_cfg[user]["library"] = library
+    sheets_cfg[user]["active"]  = active
     save_sheets(sheets_cfg)
 
-    print(f"Hoja vinculada: {sheet_name} ({sheet_id})", flush=True)
-    return jsonify({"sheet_name": sheet_name, "tab": first_tab, "tabs": tabs})
+    return jsonify({"sheet_id": sheet_id, "sheet_name": sheet_name, "tab": first_tab, "tabs": tabs})
 
 
-@app.route("/sheets/disconnect", methods=["POST"])
-def sheets_disconnect():
-    data = request.json
-    user = data.get("user")
-    sheets_cfg = load_sheets()
-    if user in sheets_cfg:
-        del sheets_cfg[user]
-        save_sheets(sheets_cfg)
-    return jsonify({"status": "disconnected"})
-
-
-@app.route("/sheets/status", methods=["GET"])
-def sheets_status():
+@app.route("/sheets/library", methods=["GET"])
+def sheets_library():
+    """Devuelve biblioteca y activas del usuario."""
     user = request.args.get("user")
     sheets_cfg = load_sheets()
     cfg = sheets_cfg.get(user, {})
-    if cfg.get("sheet_id"):
-        return jsonify({
-            "connected": True,
-            "sheet_name": cfg.get("sheet_name"),
-            "tab": cfg.get("tab"),
-            "sheet_id": cfg.get("sheet_id"),
-        })
-    return jsonify({"connected": False})
+    return jsonify({
+        "library": cfg.get("library", []),
+        "active":  cfg.get("active",  []),
+    })
+
+
+@app.route("/sheets/set-active", methods=["POST"])
+def sheets_set_active():
+    """Actualiza la lista de hojas activas."""
+    data   = request.json
+    user   = data.get("user")
+    active = data.get("active", [])   # lista de sheet_ids
+    sheets_cfg = load_sheets()
+    if user not in sheets_cfg:
+        sheets_cfg[user] = {"library": [], "active": []}
+    sheets_cfg[user]["active"] = active
+    save_sheets(sheets_cfg)
+    return jsonify({"active": active})
+
+
+@app.route("/sheets/remove", methods=["POST"])
+def sheets_remove():
+    """Elimina una hoja de la biblioteca."""
+    data     = request.json
+    user     = data.get("user")
+    sheet_id = data.get("sheet_id")
+    sheets_cfg = load_sheets()
+    if user in sheets_cfg:
+        sheets_cfg[user]["library"] = [s for s in sheets_cfg[user].get("library", []) if s["id"] != sheet_id]
+        sheets_cfg[user]["active"]  = [i for i in sheets_cfg[user].get("active",  []) if i != sheet_id]
+        save_sheets(sheets_cfg)
+    return jsonify({"status": "removed"})
 
 
 @app.route("/sheets/read", methods=["GET"])
@@ -771,31 +811,8 @@ def sheets_read():
     user = request.args.get("user")
     data = read_sheet(user)
     if data is None:
-        return jsonify({"error": "No hay hoja conectada"}), 404
+        return jsonify({"error": "No hay hojas activas"}), 404
     return jsonify({"data": data})
-
-
-@app.route("/sheets/write", methods=["POST"])
-def sheets_write():
-    data   = request.json
-    user   = data.get("user")
-    range_ = data.get("range")
-    values = data.get("values")   # [[row1col1, row1col2], [row2col1, ...]]
-    ok, msg = write_to_sheet(user, range_, values)
-    if ok:
-        return jsonify({"status": "ok", "message": msg})
-    return jsonify({"error": msg}), 400
-
-
-@app.route("/sheets/append", methods=["POST"])
-def sheets_append():
-    data   = request.json
-    user   = data.get("user")
-    values = data.get("values")
-    ok, msg = append_to_sheet(user, values)
-    if ok:
-        return jsonify({"status": "ok", "message": msg})
-    return jsonify({"error": msg}), 400
 
 
 @app.route("/")
