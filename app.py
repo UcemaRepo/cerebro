@@ -606,34 +606,44 @@ def append_to_sheet(user, values):
 
 @app.route("/sheets/connect-sheet", methods=["POST"])
 def sheets_connect_sheet():
-    """Después del OAuth, el usuario pega la URL o ID de su hoja."""
-    data     = request.json
-    user     = data.get("user")
+    data        = request.json
+    user        = data.get("user")
     sheet_input = data.get("sheet_url_or_id", "").strip()
+
+    if not sheet_input:
+        return jsonify({"error": "URL o ID de hoja vacío"}), 400
+
+    if not GOOGLE_SA_JSON:
+        return jsonify({"error": "GOOGLE_SERVICE_ACCOUNT no configurado en Render"}), 400
 
     # Extraer sheet_id de URL o usar directo
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_input)
     sheet_id = m.group(1) if m else sheet_input
+    print(f"Vinculando sheet_id={sheet_id} para user={user}", flush=True)
 
-    if not GOOGLE_SA_JSON:
-        return jsonify({"error": "GOOGLE_SERVICE_ACCOUNT no configurado en Render"}), 400
-    sheets_cfg = load_sheets()
+    svc = get_sheets_service()
+    if not svc:
+        return jsonify({"error": "No se pudo crear el servicio de Sheets — revisá GOOGLE_SERVICE_ACCOUNT"}), 500
 
-    # Leer nombre real de la hoja
     try:
-        svc = get_sheets_service(user)
-        meta = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        meta       = svc.spreadsheets().get(spreadsheetId=sheet_id).execute()
         sheet_name = meta["properties"]["title"]
-        tabs = [s["properties"]["title"] for s in meta.get("sheets", [])]
-        first_tab = tabs[0] if tabs else "Sheet1"
+        tabs       = [s["properties"]["title"] for s in meta.get("sheets", [])]
+        first_tab  = tabs[0] if tabs else "Sheet1"
     except Exception as e:
-        return jsonify({"error": f"No se pudo acceder a la hoja: {e}"}), 400
+        import traceback
+        print("ERROR accediendo a hoja:", traceback.format_exc(), flush=True)
+        return jsonify({"error": f"No se pudo acceder a la hoja: {str(e)}. ¿Compartiste la hoja con el email de la cuenta de servicio?"}), 400
 
+    sheets_cfg = load_sheets()
+    if user not in sheets_cfg:
+        sheets_cfg[user] = {}
     sheets_cfg[user]["sheet_id"]   = sheet_id
     sheets_cfg[user]["sheet_name"] = sheet_name
     sheets_cfg[user]["tab"]        = first_tab
     save_sheets(sheets_cfg)
 
+    print(f"Hoja vinculada: {sheet_name} ({sheet_id})", flush=True)
     return jsonify({"sheet_name": sheet_name, "tab": first_tab, "tabs": tabs})
 
 
