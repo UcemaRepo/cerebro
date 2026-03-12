@@ -268,13 +268,14 @@ def channel_chat(channel_id):
     else:
         reply = ""
 
-    entry = {"actor": user, "message": message, "reply": reply, "ts": time.time()}
+    files = data.get("files", [])
+    entry = {"actor": user, "message": message, "reply": reply, "files": files, "ts": time.time()}
     ch["messages"].append(entry)
     save_channels(channels)
 
     for u in user_presence:
         push_event(u, "channel_message", user,
-                   channel_id=channel_id, message=message, reply=reply)
+                   channel_id=channel_id, message=message, reply=reply, files=files)
 
     return jsonify({"reply": reply})
 
@@ -401,20 +402,21 @@ def send_dm(other_user):
     data    = request.json
     sender  = data.get("from")
     message = data.get("message", "").strip()
-    if not sender or not message:
+    files   = data.get("files", [])   # [{name, type, dataURL}]
+
+    if not sender or (not message and not files):
         return jsonify({"error": "faltan datos"}), 400
 
-    key  = dm_key(sender, other_user)
-    dms  = load_dms()
+    key = dm_key(sender, other_user)
+    dms = load_dms()
     if key not in dms:
         dms[key] = []
 
-    entry = {"from": sender, "message": message, "ts": time.time()}
+    entry = {"from": sender, "message": message, "files": files, "ts": time.time()}
     dms[key].append(entry)
     save_dms(dms)
 
-    # Notificar al destinatario en tiempo real
-    push_event(other_user, "dm", sender, message=message, conv_key=key)
+    push_event(other_user, "dm", sender, message=message, files=files, conv_key=key)
 
     return jsonify({"status": "sent", "entry": entry})
 
