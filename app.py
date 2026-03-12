@@ -634,9 +634,12 @@ def sheets_connect():
     auth_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        state=user,   # usamos state para pasar el username
+        state=user,
         prompt="consent",
     )
+    print("AUTH URL GENERADA:", auth_url)
+    print("REDIRECT_URI USADA:", REDIRECT_URI)
+    print("CLIENT_ID:", GOOGLE_CLIENT_ID[:20] + "...")
     return redirect(auth_url)
 
 
