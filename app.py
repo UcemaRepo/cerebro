@@ -633,17 +633,10 @@ def sheets_connect():
     )
     auth_url, state = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
         state=user,
         prompt="consent",
+        code_verifier=None,   # deshabilitar PKCE — no compatible con flow web server
     )
-    import sys
-    print("=== SHEETS DEBUG ===", flush=True)
-    print("AUTH URL:", auth_url, flush=True)
-    print("REDIRECT_URI:", REDIRECT_URI, flush=True)
-    print("CLIENT_ID empieza con:", GOOGLE_CLIENT_ID[:30], flush=True)
-    print("GOOGLE_AVAILABLE:", GOOGLE_AVAILABLE, flush=True)
-    sys.stdout.flush()
     return redirect(auth_url)
 
 
