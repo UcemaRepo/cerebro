@@ -536,14 +536,46 @@ def get_sheets_service(user):
     token_data = sheets.get(user, {}).get("token")
     if not token_data:
         return None
+
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+
     creds = Credentials(
-        token=token_data.get("access_token"),
-        refresh_token=token_data.get("refresh_token"),
+        token=access_token,
+        refresh_token=refresh_token,
         token_uri="https://oauth2.googleapis.com/token",
         client_id=GOOGLE_CLIENT_ID,
         client_secret=GOOGLE_CLIENT_SECRET,
         scopes=GOOGLE_SCOPES,
     )
+
+    # Refrescar token si expiró
+    if not creds.valid and creds.refresh_token:
+        try:
+            import requests as _req
+            r = _req.post("https://oauth2.googleapis.com/token", data={
+                "client_id":     GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": refresh_token,
+                "grant_type":    "refresh_token",
+            })
+            if r.ok:
+                new_token = r.json().get("access_token")
+                creds = Credentials(
+                    token=new_token,
+                    refresh_token=refresh_token,
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=GOOGLE_CLIENT_ID,
+                    client_secret=GOOGLE_CLIENT_SECRET,
+                    scopes=GOOGLE_SCOPES,
+                )
+                # Guardar token nuevo
+                all_sheets = load_sheets()
+                all_sheets[user]["token"]["access_token"] = new_token
+                save_sheets(all_sheets)
+        except Exception:
+            pass
+
     return gapi_build("sheets", "v4", credentials=creds)
 
 def read_sheet(user):
@@ -613,30 +645,23 @@ def append_to_sheet(user, values):
 
 @app.route("/sheets/connect", methods=["GET"])
 def sheets_connect():
-    """Inicia el flujo OAuth. El frontend redirige a este endpoint."""
+    """Inicia el flujo OAuth construyendo la URL manualmente (sin PKCE)."""
     user = request.args.get("user")
-    if not user or not GOOGLE_AVAILABLE or not GOOGLE_CLIENT_ID:
-        return jsonify({"error": "Google no configurado. Agregá GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET en Render."}), 400
+    if not user or not GOOGLE_CLIENT_ID:
+        return jsonify({"error": "Google no configurado."}), 400
 
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI],
-            }
-        },
-        scopes=GOOGLE_SCOPES,
-        redirect_uri=REDIRECT_URI,
-    )
-    auth_url, state = flow.authorization_url(
-        access_type="offline",
-        state=user,
-        prompt="consent",
-        code_verifier=None,   # deshabilitar PKCE — no compatible con flow web server
-    )
+    from urllib.parse import urlencode, quote
+    scope = " ".join(GOOGLE_SCOPES)
+    params = {
+        "response_type": "code",
+        "client_id":     GOOGLE_CLIENT_ID,
+        "redirect_uri":  REDIRECT_URI,
+        "scope":         scope,
+        "state":         user,
+        "access_type":   "offline",
+        "prompt":        "consent",
+    }
+    auth_url = "https://accounts.google.com/o/oauth2/auth?" + urlencode(params)
     return redirect(auth_url)
 
 
@@ -661,26 +686,22 @@ def sheets_callback():
         if callback_url.startswith("http://"):
             callback_url = "https://" + callback_url[7:]
 
-        flow = Flow.from_client_config(
-            {
-                "web": {
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": [REDIRECT_URI],
-                }
-            },
-            scopes=GOOGLE_SCOPES,
-            redirect_uri=REDIRECT_URI,
-        )
+        # Intercambiar code por tokens directamente con requests (sin PKCE)
+        import requests as _req
+        token_resp = _req.post("https://oauth2.googleapis.com/token", data={
+            "code":          code,
+            "client_id":     GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri":  REDIRECT_URI,
+            "grant_type":    "authorization_code",
+        })
+        if not token_resp.ok:
+            raise Exception(f"Token exchange failed: {token_resp.text}")
 
-        flow.fetch_token(authorization_response=callback_url)
-        creds = flow.credentials
-
+        token_json = token_resp.json()
         token_data = {
-            "access_token":  creds.token,
-            "refresh_token": creds.refresh_token,
+            "access_token":  token_json.get("access_token"),
+            "refresh_token": token_json.get("refresh_token"),
         }
 
         sheets_cfg = load_sheets()
