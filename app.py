@@ -172,39 +172,22 @@ def chat():
     if ctx:
         msgs.append({"role": "system", "content": ctx})
 
-    # Archivos enviados directamente como base64 en el payload
-    files = data.get("files", [])
+    files       = data.get("files", [])       # solo imágenes (base64)
+    doc_context = data.get("doc_context", "")  # texto extraído de documentos
 
-    # También considerar archivos subidos via /upload (legacy)
-    uploaded_text  = last_uploaded_text.get(user, "")
-    uploaded_image = last_uploaded_image.get(user)
+    # Contexto de documentos
+    if doc_context:
+        msgs.append({"role": "system", "content": "El usuario adjuntó estos documentos:\n\n" + doc_context})
 
-    # Separar archivos por tipo
+    # Imágenes
     image_files = [f for f in files if f.get("type", "").startswith("image/")]
-    doc_files   = [f for f in files if not f.get("type", "").startswith("image/")]
 
-    # Texto de documentos (PDF, txt, csv, xlsx del payload — ya procesados en /upload)
-    if uploaded_text:
-        msgs.append({"role": "system", "content": "Documento subido:\n\n" + uploaded_text})
-
-    # Construir mensaje del usuario con imágenes si hay
-    all_images = image_files[:]
-    if uploaded_image and not image_files:
-        # imagen legacy del /upload
-        import base64 as _b64
-        with open(uploaded_image, "rb") as img:
-            b64 = _b64.b64encode(img.read()).decode()
-        all_images.append({"type": "legacy", "dataURL": f"data:image/jpeg;base64,{b64}"})
-
-    if all_images:
+    if image_files:
         content_parts = [{"type": "text", "text": message or " "}]
-        for img in all_images:
+        for img in image_files:
             data_url = img.get("dataURL", "")
             if data_url:
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": data_url}
-                })
+                content_parts.append({"type": "image_url", "image_url": {"url": data_url}})
         msgs.append({"role": "user", "content": content_parts})
     else:
         msgs.append({"role": "user", "content": message or " "})
@@ -487,6 +470,73 @@ def upload():
         return jsonify({"error": "Tipo no soportado"}), 400
 
     return jsonify({"status": "uploaded", "filename": file.filename})
+
+
+@app.route("/extract-file", methods=["POST"])
+def extract_file():
+    """Recibe un archivo en base64 y devuelve su texto extraído."""
+    import base64 as _b64
+    import tempfile
+    data     = request.json
+    name     = data.get("name", "archivo")
+    dataURL  = data.get("dataURL", "")
+    fn       = name.lower()
+
+    # Decodificar base64
+    try:
+        if "," in dataURL:
+            raw = _b64.b64decode(dataURL.split(",", 1)[1])
+        else:
+            raw = _b64.b64decode(dataURL)
+    except Exception as e:
+        return jsonify({"error": f"Error decodificando archivo: {e}"}), 400
+
+    # Guardar en temp
+    suffix = os.path.splitext(fn)[1] or ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+
+    try:
+        text = ""
+        if fn.endswith((".txt", ".csv", ".md", ".json", ".html")):
+            with open(tmp_path, encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+
+        elif fn.endswith((".xlsx", ".xls")):
+            wb = openpyxl.load_workbook(tmp_path, data_only=True)
+            sheets = []
+            for sn in wb.sheetnames:
+                ws = wb[sn]
+                rows = [" | ".join(str(c) if c is not None else "" for c in r)
+                        for r in ws.iter_rows(values_only=True) if any(c is not None for c in r)]
+                if rows:
+                    sheets.append(f"[Hoja: {sn}]\n" + "\n".join(rows))
+            text = "\n\n".join(sheets)
+
+        elif fn.endswith(".pdf"):
+            if not PDF_AVAILABLE:
+                return jsonify({"error": "PDF no soportado"}), 400
+            reader = PdfReader(tmp_path)
+            pages = []
+            for i, page in enumerate(reader.pages):
+                t = page.extract_text() or ""
+                if t.strip():
+                    pages.append(f"[Página {i+1}]\n{t.strip()}")
+            text = "\n\n".join(pages) if pages else "[PDF sin texto extraíble]"
+
+        else:
+            return jsonify({"error": f"Tipo no soportado: {suffix}"}), 400
+
+        return jsonify({"text": text, "name": name})
+
+    except Exception as e:
+        import traceback
+        print("EXTRACT ERROR:", traceback.format_exc(), flush=True)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        try: os.unlink(tmp_path)
+        except: pass
 
 
 # ── Historial personal ────────────────────────────────────────────────────
