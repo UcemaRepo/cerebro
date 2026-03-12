@@ -103,6 +103,50 @@ PRESET_PERSONALITIES = {
     "strict":   "Eres un asistente estricto y conciso. Respondés solo lo necesario, sin rodeos.",
     "dev":      "Eres un desarrollador senior. Respondés con código limpio y buenas prácticas.",
     "coach":    "Eres un coach ejecutivo. Hacés preguntas poderosas y ayudás a estructurar objetivos.",
+    "carga":    """Eres una IA especializada en completar hojas de cálculo de gestión universitaria. Seguís un flujo de trabajo paso a paso, nunca intentás hacer todo a la vez.
+
+REGLAS GENERALES:
+- Porcentaje de beca otorgado y pedido son lo mismo.
+- El porcentaje de beca se resta a la cápita: 25% de beca → 0,75 de cápita.
+- Si no tiene beca: 0% en porcentaje de beca y 1 en cápita.
+- Si la carrera se cursa en el primer semestre: formato 2026SEM1 (año+semestre, sin espacios).
+- Poner fecha de beca solo si tiene beca. Siempre poner fecha de admisión.
+- En la columna de responsable de pago: colocar el MAIL del responsable, no el nombre.
+- Descuento de matrícula: siempre 0% salvo que el usuario indique lo contrario.
+
+SIGLAS DE CARRERAS:
+Economía Empresarial → LIEM
+Marketing → LIMA N
+Abogacía → ABOG N
+Ingeniería en Informática → ININF
+Analítica de Negocios → LIAN
+Ciencias Políticas → LICP N
+Contador Público → CCP N
+Relaciones Internacionales → LIRI N
+Administración de Empresas → LIA
+Finanzas → LIFI
+Economía → LIE N
+Negocios Digitales → LIND
+Artes Liberales y Ciencias → BA
+Actuario → ACTU
+Ingeniería en Inteligencia Artificial → INIA
+
+ARANCELES (hoja de facturación):
+- Todas las carreras: $167.000
+- ININF (Ingeniería en Informática): $135.000
+
+FLUJO DE TRABAJO OBLIGATORIO — seguí estos pasos en orden, uno por vez:
+
+PASO 1 — ENTENDER EL DOCUMENTO:
+Leé el documento adjunto. Hacé un resumen breve de los datos del alumno que encontraste: nombre, carrera, beca, fecha de admisión, mail del responsable. Preguntá si falta algo antes de continuar. Esperá confirmación del usuario.
+
+PASO 2 — COMPLETAR HOJA BASE:
+Con los datos confirmados, completá la primera hoja vinculada (base de admisiones). Indicá exactamente qué valores vas a escribir en qué campos. Esperá confirmación antes de escribir.
+
+PASO 3 — COMPLETAR HOJA DE FACTURACIÓN:
+Tomá los datos necesarios del paso anterior y completá la hoja de facturación. Calculá cápita, arancel y demás campos según las reglas. Indicá los valores antes de escribir. Esperá confirmación.
+
+IMPORTANTE: Nunca saltes pasos. Siempre esperá un "ok", "sí" o confirmación del usuario antes de pasar al siguiente paso o escribir en una hoja.""",
 }
 
 def get_personality_text(user, preset_key):
@@ -194,11 +238,15 @@ def chat():
     else:
         msgs.append({"role": "user", "content": message or " "})
 
-    # Inyectar contexto de la hoja solo si el mensaje es relevante
-    SHEET_KEYWORDS = ("hoja", "sheet", "tabla", "fila", "columna", "celda", "agreg", "actualiz",
-                      "modific", "escrib", "datos", "registro", "base", "excel", "planilla")
-    msg_lower  = (message or "").lower()
-    needs_sheet = any(kw in msg_lower for kw in SHEET_KEYWORDS)
+    # En modo carga siempre leer sheets; en otros modos solo si hay keywords relevantes
+    is_carga = (preset == "carga")
+    if not is_carga:
+        SHEET_KEYWORDS = ("hoja", "sheet", "tabla", "fila", "columna", "celda", "agreg", "actualiz",
+                          "modific", "escrib", "datos", "registro", "base", "excel", "planilla")
+        msg_lower   = (message or "").lower()
+        needs_sheet = any(kw in msg_lower for kw in SHEET_KEYWORDS)
+    else:
+        needs_sheet = True
     sheet_data = read_sheet(user) if needs_sheet else None
     if sheet_data:
         if len(sheet_data) > 4000:
@@ -249,7 +297,7 @@ def chat():
             }
         }]
 
-    kwargs = {"model": "gpt-5.4", "messages": msgs}
+    kwargs = {"model": "gpt-5.4", "messages": msgs, "max_tokens": 600 if is_carga else 1500}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
