@@ -275,8 +275,6 @@ def chat():
         reply = msg_obj.content
 
     entry = {"message": message, "reply": reply, "actor": user}
-    if uploaded_text:
-        entry["file"] = last_uploaded_text.get(user + "_filename", "archivo")
     history[user].append(entry)
     save_history(history)
 
